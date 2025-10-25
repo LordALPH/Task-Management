@@ -10,9 +10,11 @@ import {
   serverTimestamp,
   query,
   where,
+  onSnapshot,
 } from "firebase/firestore";
 import { createUserWithEmailAndPassword, signOut } from "firebase/auth";
 import { useRouter } from "next/navigation";
+import DashboardAnalytics from "./component/DashboardAnalytics";
 
 export default function AdminDashboard() {
   const router = useRouter();
@@ -39,6 +41,39 @@ export default function AdminDashboard() {
     };
     fetchData();
   }, []);
+  useEffect(() => {
+  // Real-time listener for users
+  const usersRef = collection(db, "users");
+  const unsubscribeUsers = onSnapshot(usersRef, (snapshot) => {
+    setUsers(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
+  });
+
+  // Real-time listener for tasks
+  const tasksRef = collection(db, "tasks");
+  const unsubscribeTasks = onSnapshot(tasksRef, (snapshot) => {
+    setTasks(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
+  });
+
+  setLoading(false);
+
+  // Clean up listeners on unmount
+  return () => {
+    unsubscribeUsers();
+    unsubscribeTasks();
+  };
+}, []);
+
+useEffect(() => {
+  const fetchData = async () => {
+    const usersSnap = await getDocs(collection(db, "users"));
+    const tasksSnap = await getDocs(collection(db, "tasks"));
+    setUsers(usersSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    setTasks(tasksSnap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    setLoading(false);
+  };
+  fetchData();
+}, []);
+
 
   // 🔹 Add new employee
   const addEmployee = async (e) => {
@@ -250,6 +285,8 @@ export default function AdminDashboard() {
           <p className="text-gray-500">No tasks found.</p>
         )}
       </div>
+
+      <DashboardAnalytics tasks={tasks} />
     </div>
   );
 }
