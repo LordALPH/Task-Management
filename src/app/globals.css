@@ -24,3 +24,37 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Custom UI helpers for admin theme */
+.glass-card {
+  background: rgba(255,255,255,0.7);
+  backdrop-filter: blur(6px) saturate(120%);
+}
+
+@keyframes slideInLeft {
+  from { transform: translateX(-12px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes floatUp {
+  from { transform: translateY(6px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.animate-slide-left { animation: slideInLeft 380ms cubic-bezier(.22,.9,.32,1) both; }
+.animate-float-up { animation: floatUp 420ms cubic-bezier(.2,.8,.25,1) both; }
+
+@keyframes slideDown {
+  from { transform: translateY(-12px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.animate-slide-down { animation: slideDown 360ms cubic-bezier(.22,.9,.32,1) both; }
+
+.nav-item { transition: transform .18s ease, background-color .18s ease, color .18s ease; }
+.nav-item:hover { transform: translateX(6px); }
+
+.card-hover { transition: transform .18s ease, box-shadow .18s ease; }
+.card-hover:hover { transform: translateY(-6px); box-shadow: 0 20px 40px rgba(2,6,23,0.12); }
+
+/* small utility for subtle divider in sidebar */
+.sidebar-divider { height: 1px; background: rgba(255,255,255,0.08); margin: 12px 0; }

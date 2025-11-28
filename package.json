@@ -15,7 +15,13 @@
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "recharts": "^3.3.0"
+    ,"firebase-admin": "^11.11.0"
   },
+  "optionalDependencies": {
+    "papaparse": "^5.4.1",
+    "xlsx": "^0.18.5"
+  },
+  
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "eslint": "^9",

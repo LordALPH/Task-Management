@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="dashboard">
+        <header class="dashboard-header">
+            <h1>Admin Dashboard</h1>
+            <nav class="dashboard-nav">
+                <ul>
+                    <li class="tab active" onclick="showTab('employeeProgress')">Employee Progress</li>
+                    <li class="tab" onclick="showTab('allTasks')">All Tasks</li>
+                    <li class="tab" onclick="showTab('memberAddTask')">Member Add/Task Assigned</li>
+                </ul>
+            </nav>
+        </header>
+        
+        <div class="tab-content">
+            <div id="employeeProgress" class="tab-pane active">
+                <!-- Existing Employee Progress Code Here -->
+                <h2>Employee Progress</h2>
+                <p>Content for Employee Progress...</p>
+            </div>
+            <div id="allTasks" class="tab-pane">
+                <!-- Existing All Tasks Code Here -->
+                <h2>All Tasks</h2>
+                <p>Content for All Tasks...</p>
+            </div>
+            <div id="memberAddTask" class="tab-pane">
+                <!-- Existing Member Add/Task Assigned Code Here -->
+                <h2>Member Add/Task Assigned</h2>
+                <p>Content for Member Add/Task Assigned...</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

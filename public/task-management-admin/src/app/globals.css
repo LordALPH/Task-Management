@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <link rel="stylesheet" href="styles.css"> <!-- Custom styles -->
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="text-center">Admin Dashboard</h1>
+        <ul class="nav nav-tabs" id="myTab" role="tablist">
+            <li class="nav-item">
+                <a class="nav-link active" id="employee-progress-tab" data-toggle="tab" href="#employee-progress" role="tab" aria-controls="employee-progress" aria-selected="true">Employee Progress</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" id="all-tasks-tab" data-toggle="tab" href="#all-tasks" role="tab" aria-controls="all-tasks" aria-selected="false">All Tasks</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" id="member-add-tab" data-toggle="tab" href="#member-add" role="tab" aria-controls="member-add" aria-selected="false">Member Add/Task Assigned</a>
+            </li>
+        </ul>
+        <div class="tab-content" id="myTabContent">
+            <div class="tab-pane fade show active" id="employee-progress" role="tabpanel" aria-labelledby="employee-progress-tab">
+                <!-- Employee Progress Content -->
+                <h2>Employee Progress</h2>
+                <div id="employee-progress-content">
+                    <!-- Existing Employee Progress Code Here -->
+                </div>
+            </div>
+            <div class="tab-pane fade" id="all-tasks" role="tabpanel" aria-labelledby="all-tasks-tab">
+                <!-- All Tasks Content -->
+                <h2>All Tasks</h2>
+                <div id="all-tasks-content">
+                    <!-- Existing All Tasks Code Here -->
+                </div>
+            </div>
+            <div class="tab-pane fade" id="member-add" role="tabpanel" aria-labelledby="member-add-tab">
+                <!-- Member Add/Task Assigned Content -->
+                <h2>Member Add/Task Assigned</h2>
+                <div id="member-add-content">
+                    <!-- Existing Member Add/Task Assigned Code Here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.9.2/dist/umd/popper.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+    <script src="script.js"></script> <!-- Custom scripts -->
+</body>
+</html>

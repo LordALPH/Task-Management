@@ -8,9 +8,9 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
+  LineChart,
+  Line,
+  CartesianGrid,
 } from "recharts";
 
 const DashboardAnalytics = ({ tasks }) => {
@@ -99,7 +99,34 @@ const DashboardAnalytics = ({ tasks }) => {
     };
   });
 
-  const COLORS = ["#22c55e", "#eab308"];
+  // Build per-user timeline data when a single user is selected
+  const selectedUserEmail = chartData.length === 1 ? chartData[0].name : null;
+
+  const timelineData = useMemo(() => {
+    if (!selectedUserEmail) return [];
+    // group by due date (use dueDate or endDate)
+    const map = {};
+    filteredTasks.forEach((task) => {
+      const email = task.assignedEmail || "Unknown";
+      if (email !== selectedUserEmail) return;
+      let due = null;
+      if (task.dueDate) {
+        due = task.dueDate.seconds ? new Date(task.dueDate.seconds * 1000) : new Date(task.dueDate);
+      } else if (task.endDate) {
+        due = task.endDate.toDate ? task.endDate.toDate() : new Date(task.endDate);
+      }
+      if (!due) return;
+      const key = due.toLocaleDateString();
+      if (!map[key]) map[key] = { date: key, Completed: 0, Pending: 0, Overdue: 0 };
+      const now = new Date();
+      if (task.status === "completed") map[key].Completed++;
+      else map[key].Pending++;
+      if (due < now && task.status !== "completed") map[key].Overdue++;
+    });
+
+    // convert to sorted array
+    return Object.values(map).sort((a, b) => new Date(a.date) - new Date(b.date));
+  }, [filteredTasks, selectedUserEmail]);
 
   return (
     <div className="mt-8">
@@ -158,26 +185,34 @@ const DashboardAnalytics = ({ tasks }) => {
               </ResponsiveContainer>
             </div>
 
-            {/* Pie Chart */}
+            {/* Progress Graph for selected user (replaces previous pie chart). */}
             <div className="h-80">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={chartData.map((d) => ({
-                      name: d.name,
-                      value: d.Completed,
-                    }))}
-                    dataKey="value"
-                    outerRadius={100}
-                    label
-                  >
-                    {chartData.map((entry, index) => (
-                      <Cell key={index} fill={COLORS[index % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
+              {selectedUserEmail ? (
+                timelineData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={timelineData} margin={{ top: 10, right: 20, left: 0, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                      <YAxis allowDecimals={false} />
+                      <Tooltip />
+                      <Legend />
+                      <Line type="monotone" dataKey="Completed" stroke="#22c55e" strokeWidth={2} />
+                      <Line type="monotone" dataKey="Pending" stroke="#eab308" strokeWidth={2} />
+                      <Line type="monotone" dataKey="Overdue" stroke="#ef4444" strokeWidth={2} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-full flex flex-col items-center justify-center text-gray-500">
+                    <p className="font-medium">No dated tasks for {selectedUserEmail}</p>
+                    <p className="text-sm">Tasks without a due/end date won't appear here.</p>
+                  </div>
+                )
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center text-gray-500">
+                  <p className="font-medium">Select a user to see detailed progress</p>
+                  <p className="text-sm">Use the 'User' selector above to focus on one member.</p>
+                </div>
+              )}
             </div>
           </div>
         ) : (
