@@ -110,20 +110,20 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-900 p-6">
+    <div className="min-h-screen flex items-center justify-center bg-blue-600 p-6">
       <div className="w-full max-w-md relative z-10">
         <div className="mb-6 text-center">
-          <div className="inline-flex items-center gap-3">
-            <div className="bg-white/6 p-3 rounded-md shadow-sm">
+          <div className="flex flex-col items-center gap-2">
+            <div className="bg-white/10 p-4 rounded-full shadow-sm">
               <svg
-                width="44"
-                height="44"
+                width="56"
+                height="56"
                 viewBox="0 0 48 48"
                 fill="none"
                 xmlns="http://www.w3.org/2000/svg"
                 aria-hidden="true"
               >
-                <rect width="48" height="48" rx="8" fill="white" fillOpacity="0.06" />
+                <rect width="48" height="48" rx="8" fill="white" fillOpacity="0.08" />
                 <path
                   d="M14 12v24M34 12v24M14 24h20"
                   stroke="white"
@@ -134,11 +134,9 @@ export default function LoginPage() {
               </svg>
             </div>
 
-            <div className="text-left">
-              <div className="text-white text-2xl font-semibold tracking-wide">
-                Haier
-              </div>
-              <div className="text-white/70 text-sm -mt-1">Task Management</div>
+            <div className="text-center">
+              <div className="text-white text-3xl font-extrabold tracking-wide">Haier</div>
+              <div className="text-white/90 text-sm -mt-1">Task Management</div>
             </div>
           </div>
         </div>
