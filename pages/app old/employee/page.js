@@ -61,6 +61,7 @@ export default function AdminDashboard() {
   const [statusChangingIds, setStatusChangingIds] = useState(new Set());
   // store transient reaction per task id (e.g., 'completed'|'delayed'|'cancelled'|'in process')
   const [statusReactions, setStatusReactions] = useState({});
+  const [pendingRequests, setPendingRequests] = useState(new Set());
 
   // 🔹 Fetch all users + tasks (initial)
   useEffect(() => {
@@ -92,6 +93,21 @@ export default function AdminDashboard() {
     });
     return () => unsub();
   }, []);
+
+  // listen for this user's pending statusRequests so we can show pending badges
+  useEffect(() => {
+    if (!currentUser) return;
+    const q = query(collection(db, 'statusRequests'), where('requestedByUid', '==', currentUser.uid));
+    const unsub = onSnapshot(q, (snap) => {
+      const pending = new Set();
+      snap.docs.forEach((d) => {
+        const data = d.data();
+        if (data.status === 'pending' && data.taskId) pending.add(data.taskId);
+      });
+      setPendingRequests(pending);
+    });
+    return () => unsub();
+  }, [currentUser]);
 
   // show a welcome popup for employees (5s) when they sign in / visit
   useEffect(() => {
@@ -304,36 +320,27 @@ export default function AdminDashboard() {
     }
   };
 
-  // allow employee to update their assigned task status (optimistic + persist)
+  // allow employee to request a status change (create approval request instead of direct change)
   const updateTaskStatus = async (taskId, newStatus) => {
-    const prev = tasks;
-    // mark as changing for animation
-    setStatusChangingIds((s) => new Set([...s, taskId]));
     try {
-      setTasks((tlist) => tlist.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t)));
-      await updateDoc(doc(db, "tasks", taskId), { status: newStatus });
-      // set a reaction based on the new status
-      const n = (newStatus || "").toString().toLowerCase();
-      let reaction = null;
-      if (n.includes("complete")) reaction = "completed";
-      else if (n.includes("cancel")) reaction = "cancelled";
-      else if (n.includes("delay")) reaction = "delayed";
-      else reaction = "in process";
-      if (reaction) {
-        setStatusReactions((prevMap) => ({ ...prevMap, [taskId]: reaction }));
-        // clear after 2.5s
-        setTimeout(() => setStatusReactions((m) => { const copy = { ...m }; delete copy[taskId]; return copy; }), 2500);
-      }
+      const t = tasks.find((x) => x.id === taskId) || {};
+      await addDoc(collection(db, 'statusRequests'), {
+        taskId,
+        taskTitle: t.title || "",
+        requestedByUid: currentUser ? currentUser.uid : null,
+        requestedByEmail: currentUser ? currentUser.email : null,
+        requestedByName: currentUser ? (currentUser.displayName || currentUser.email) : null,
+        fromStatus: t.status || "",
+        requestedStatus: newStatus,
+        status: 'pending',
+        createdAt: serverTimestamp(),
+      });
+      // mark locally as pending for quick feedback
+      setPendingRequests((prev) => new Set(prev).add(taskId));
+      alert('Request submitted for admin approval.');
     } catch (err) {
-      setTasks(prev);
-      alert("Failed to update status: " + err.message);
-    } finally {
-      // remove the animation marker shortly after
-      setTimeout(() => setStatusChangingIds((s) => {
-        const n = new Set(s);
-        n.delete(taskId);
-        return n;
-      }), 800);
+      console.error('Request failed', err);
+      alert('Failed to submit request: ' + (err.message || err));
     }
   };
 
@@ -634,7 +641,7 @@ export default function AdminDashboard() {
               {myTasks.map((task) => (
                 <div key={task.id} className={`py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4 ${statusChangingIds.has(task.id) ? 'animate-pulse ring-2 ring-indigo-200' : 'hover:shadow-sm'}`}>
                   <div className="flex-1">
-                    <p className="font-medium text-gray-800">{task.title} {task.priority && (<span className={`ml-2 text-xs font-semibold inline-block px-2 py-1 rounded ${task.priority === 'high' ? 'bg-red-100 text-red-700' : task.priority === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>{task.priority}</span>)}</p>
+                    <p className="font-medium text-gray-800">{task.title} {task.priority && (<span className={`ml-2 text-xs font-semibold inline-block px-2 py-1 rounded ${task.priority === 'high' ? 'bg-red-100 text-red-700' : task.priority === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>{task.priority}</span>)} {pendingRequests.has(task.id) && (<span className="ml-2 text-xs px-2 py-1 bg-yellow-100 text-yellow-800 rounded">Pending approval</span>)}</p>
                     <p className="text-sm text-gray-500 mt-1">Duration: {formatDate(task.startDate)} — {formatDate(task.endDate)}</p>
                   </div>
 

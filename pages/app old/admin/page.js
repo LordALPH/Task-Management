@@ -15,9 +15,11 @@ import {
   where,
   onSnapshot,
   deleteDoc,
+  writeBatch,
 } from "firebase/firestore";
-import { createUserWithEmailAndPassword, signOut } from "firebase/auth";
+import { createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
 import DashboardAnalytics from "./component/DashboardAnalytics";
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 
@@ -62,6 +64,7 @@ export default function AdminDashboard() {
 
   // Task priority state (new)
   const [priority, setPriority] = useState("medium"); // options: low, medium, high
+  const [reminderOnAdd, setReminderOnAdd] = useState(false);
 
   // delete-mode toggles shown at section headings (right side)
   const [showDeleteUsers, setShowDeleteUsers] = useState(false);
@@ -70,7 +73,7 @@ export default function AdminDashboard() {
   // UI view state: 'progress' | 'alltasks' | 'members'
   const [activeView, setActiveView] = useState("progress");
   const [filterName, setFilterName] = useState("");
-  const [filterStatus, setFilterStatus] = useState("all");
+  const [selectedStatuses, setSelectedStatuses] = useState(new Set(["all"]));
 
   // actual status map (editable boxes per task)
   const [actualStatusMap, setActualStatusMap] = useState({});
@@ -85,6 +88,11 @@ export default function AdminDashboard() {
   // Welcome popup shown to admins on dashboard load (5s)
   const [showWelcome, setShowWelcome] = useState(false);
   const [welcomeVisible, setWelcomeVisible] = useState(false);
+  // client-only current user email to avoid hydration mismatch
+  const [currentEmail, setCurrentEmail] = useState(null);
+  // approvals list
+  const [showApprovalsPanel, setShowApprovalsPanel] = useState(false);
+  const [approvals, setApprovals] = useState([]);
 
   useEffect(() => {
     let hideTimer = null;
@@ -115,6 +123,18 @@ export default function AdminDashboard() {
     };
   }, []);
 
+  // keep a client-side current email state in sync with auth to avoid SSR/CSR mismatch
+  useEffect(() => {
+    try {
+      const unsub = onAuthStateChanged(auth, (u) => {
+        setCurrentEmail(u ? u.email : null);
+      });
+      return () => unsub && unsub();
+    } catch (e) {
+      // ignore in non-browser environments
+    }
+  }, []);
+
   // 🔹 Fetch all users + tasks (initial)
   useEffect(() => {
     const fetchData = async () => {
@@ -133,7 +153,7 @@ export default function AdminDashboard() {
     fetchData();
   }, []);
 
-  // Real-time listeners
+  // Real-time listeners (users, tasks, approvals)
   useEffect(() => {
     const usersRef = collection(db, "users");
     const unsubscribeUsers = onSnapshot(usersRef, (snapshot) => {
@@ -159,11 +179,18 @@ export default function AdminDashboard() {
       });
     });
 
+    // Listen for pending approval requests (statusRequests collection)
+    const approvalsRef = collection(db, 'statusRequests');
+    const unsubscribeApprovals = onSnapshot(query(approvalsRef, where('status', '==', 'pending')), (snap) => {
+      setApprovals(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+
     setLoading(false);
 
     return () => {
       unsubscribeUsers();
       unsubscribeTasks();
+      unsubscribeApprovals();
     };
   }, []);
 
@@ -257,14 +284,19 @@ export default function AdminDashboard() {
         alert("❌ No employee found with that email.");
         return;
       }
-      employee = employeeSnap.docs[0].data();
+      const d = employeeSnap.docs[0];
+      employee = { id: d.id, ...(d.data() || {}) };
     }
+
+    // ensure assignedTo is not undefined (Firestore rejects undefined fields)
+    const assignedToVal = employee?.uid || employee?.id || null;
+    const assignedEmailVal = employee?.email || assignedEmail || "";
 
     await addDoc(collection(db, "tasks"), {
       title,
-      assignedTo: employee.uid,
-      assignedEmail: employee.email,
-      assignedName: employee.name || "",
+      assignedTo: assignedToVal,
+      assignedEmail: assignedEmailVal,
+      assignedName: employee?.name || "",
       startDate: sDate,
       endDate: eDate,
       priority: priority, // new field
@@ -273,6 +305,18 @@ export default function AdminDashboard() {
       actualStatus: "",
     });
 
+    // optionally open mail compose to notify assigned user
+    try {
+      if (reminderOnAdd && typeof window !== 'undefined') {
+        const to = employee.email || "";
+        const subject = `New Task Assigned: ${title}`;
+        const body = `Hello ${employee.name || ''},\n\nYou have been assigned a new task:\n\nTitle: ${title}\nStart: ${formatDate(sDate)}\nEnd: ${formatDate(eDate)}\nPriority: ${priority}\n\nPlease acknowledge this task.\n\nRegards,\nAdmin`;
+        const outlookUrl = `https://outlook.office.com/mail/deeplink/compose?to=${encodeURIComponent(to)}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+        window.open(outlookUrl, "_blank");
+      }
+    } catch (e) {
+      // ignore pop-up failures
+    }
     // reset form
     setTitle("");
     setSelectedUserId("");
@@ -308,10 +352,113 @@ export default function AdminDashboard() {
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Delete failed');
       alert('User removed. Server deletion complete.');
-      // onSnapshot listeners will update UI automatically
+      // optimistically remove from local UI immediately so admin sees instant feedback
+      setUsers((prev) => prev.filter((u) => (u.id !== userId && (u.uid ? u.uid !== userId : true))));
+      setTasks((prev) => prev.filter((t) => t.assignedTo !== userId && t.assignedEmail !== userEmail));
+
+      // also refetch users and tasks from Firestore to ensure UI reflects server state
+      try {
+        const [usersSnap, tasksSnap] = await Promise.all([
+          getDocs(collection(db, 'users')),
+          getDocs(collection(db, 'tasks')),
+        ]);
+        const usersData = usersSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        const tasksData = tasksSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        setUsers(usersData);
+        setTasks(tasksData);
+      } catch (refetchErr) {
+        console.error('Refetch after delete failed', refetchErr);
+      }
     } catch (err) {
       console.error(err);
       alert('Delete failed: ' + (err.message || err));
+    }
+  };
+
+  // 🔹 Edit user (name / email) without affecting tasks association
+  const [showEditUserModal, setShowEditUserModal] = useState(false);
+  const [editUserId, setEditUserId] = useState("");
+  const [editUserName, setEditUserName] = useState("");
+  const [editUserEmail, setEditUserEmail] = useState("");
+  const [editUserOldEmail, setEditUserOldEmail] = useState("");
+  const [editing, setEditing] = useState(false);
+
+  const openEditUser = (u) => {
+    setEditUserId(u.uid || u.id);
+    setEditUserName(u.name || "");
+    setEditUserEmail(u.email || "");
+    setEditUserOldEmail(u.email || "");
+    setShowEditUserModal(true);
+  };
+
+  // Approve / reject handlers for statusRequests
+  const approveRequest = async (req) => {
+    try {
+      if (!req || !req.taskId) throw new Error('Invalid request');
+      // update task status
+      await updateDoc(doc(db, 'tasks', req.taskId), { status: req.requestedStatus, adminApprovalNote: `Approved by ${auth.currentUser ? auth.currentUser.email : 'admin'} on ${new Date().toLocaleString()}` });
+      // mark request resolved
+      await updateDoc(doc(db, 'statusRequests', req.id), { status: 'approved', resolvedAt: serverTimestamp(), resolvedBy: auth.currentUser ? auth.currentUser.uid : null });
+      alert('Request approved. Task status updated.');
+    } catch (err) {
+      console.error('Approve failed', err);
+      alert('Approve failed: ' + (err.message || err));
+    }
+  };
+
+  const rejectRequest = async (req) => {
+    try {
+      if (!req) throw new Error('Invalid request');
+      await updateDoc(doc(db, 'statusRequests', req.id), { status: 'rejected', resolvedAt: serverTimestamp(), resolvedBy: auth.currentUser ? auth.currentUser.uid : null });
+      alert('Request rejected.');
+    } catch (err) {
+      console.error('Reject failed', err);
+      alert('Reject failed: ' + (err.message || err));
+    }
+  };
+
+  const saveEditedUser = async (e) => {
+    e && e.preventDefault && e.preventDefault();
+    if (!editUserId) return;
+    setEditing(true);
+    try {
+      // update user doc
+      const userRef = doc(db, "users", editUserId);
+      await updateDoc(userRef, { name: editUserName, email: editUserEmail });
+
+      // update related tasks' assignedName/assignedEmail
+      // 1) tasks where assignedTo == uid
+      const tasksByUidSnap = await getDocs(query(collection(db, "tasks"), where("assignedTo", "==", editUserId)));
+      // 2) tasks where assignedEmail == oldEmail
+      const tasksByEmailSnap = editUserOldEmail ? await getDocs(query(collection(db, "tasks"), where("assignedEmail", "==", editUserOldEmail))) : { docs: [] };
+
+      const batch = writeBatch(db);
+      const touched = new Set();
+
+      tasksByUidSnap.docs.forEach((d) => {
+        touched.add(d.id);
+        batch.update(d.ref, { assignedName: editUserName, assignedEmail: editUserEmail });
+      });
+
+      tasksByEmailSnap.docs.forEach((d) => {
+        if (touched.has(d.id)) return;
+        touched.add(d.id);
+        batch.update(d.ref, { assignedName: editUserName, assignedEmail: editUserEmail });
+      });
+
+      await batch.commit();
+
+      // optimistic UI updates
+      setUsers((prev) => prev.map((u) => (u.id === editUserId ? { ...u, name: editUserName, email: editUserEmail } : u)));
+      setTasks((prev) => prev.map((t) => (t.assignedTo === editUserId || t.assignedEmail === editUserOldEmail ? { ...t, assignedName: editUserName, assignedEmail: editUserEmail } : t)));
+
+      setShowEditUserModal(false);
+      alert('User updated successfully. Related tasks updated to reflect new name/email.');
+    } catch (err) {
+      console.error('Edit user failed', err);
+      alert('Edit failed: ' + (err.message || err));
+    } finally {
+      setEditing(false);
     }
   };
 
@@ -482,6 +629,20 @@ export default function AdminDashboard() {
     }
     return list;
   }, [tasks, graphUserFilter, graphStartDate, graphEndDate, users]);
+
+  const pieData = useMemo(() => {
+    const counts = { completed: 0, "in process": 0, delayed: 0, cancelled: 0 };
+    tasks.forEach((t) => {
+      const s = canonicalStatus(t.status);
+      counts[s] = (counts[s] || 0) + 1;
+    });
+    return [
+      { name: 'Completed', value: counts.completed },
+      { name: 'In process', value: counts['in process'] },
+      { name: 'Delayed', value: counts.delayed },
+      { name: 'Cancelled', value: counts.cancelled },
+    ];
+  }, [tasks]);
 
   // compute reminders: tasks pending and due within next 3 days (including today)
   const remindersList = useMemo(() => {
@@ -729,6 +890,7 @@ export default function AdminDashboard() {
                 <button onClick={() => { setShowAddTaskPanel((s) => !s); setShowAddEmployeePanel(false); setShowBulkPanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6">Add Task</button>
                 <button onClick={() => { setShowBulkPanel((s) => !s); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6">Bulk Add Tasks</button>
                 <button onClick={() => { setShowBulkUserPanel((s) => !s); setShowBulkPanel(false); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6">Bulk Add Users</button>
+                <button onClick={() => { setShowApprovalsPanel((s) => !s); setShowBulkUserPanel(false); setShowBulkPanel(false); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6">Approvals</button>
               </div>
             </div>
           </div>
@@ -736,7 +898,7 @@ export default function AdminDashboard() {
           <div className="pt-6">
             <div className="sidebar-divider" />
             <div className="flex items-center justify-between mt-3">
-              <div className="text-sm text-white/90">{auth.currentUser ? auth.currentUser.email : "Admin"}</div>
+              <div className="text-sm text-white/90">{currentEmail ? currentEmail : "Admin"}</div>
               <button onClick={handleLogout} className="bg-white text-indigo-700 px-3 py-2 rounded-md">Logout</button>
             </div>
           </div>
@@ -753,6 +915,50 @@ export default function AdminDashboard() {
               </div>
             </div>
           )}
+
+              {showApprovalsPanel && (
+                <div className="fixed left-72 right-6 top-6 z-50 animate-slide-down">
+                  <div className="bg-white p-6 rounded-2xl shadow-lg relative">
+                    <div className="absolute right-3 top-3">
+                      <button onClick={() => setShowApprovalsPanel(false)} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
+                    </div>
+                    <h2 className="text-xl font-semibold mb-4">🔔 Approval Requests</h2>
+                    {approvals.length === 0 ? (
+                      <p className="text-gray-500">No pending approval requests.</p>
+                    ) : (
+                      <div className="max-h-80 overflow-auto">
+                        <table className="min-w-full text-sm">
+                          <thead>
+                            <tr className="bg-gray-100">
+                              <th className="p-2 text-left">Member</th>
+                              <th className="p-2 text-left">Task</th>
+                              <th className="p-2 text-left">From</th>
+                              <th className="p-2 text-left">To</th>
+                              <th className="p-2 text-left">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {approvals.map((r) => (
+                              <tr key={r.id} className="border-b hover:bg-white/50">
+                                <td className="p-2">{r.requestedByName || r.requestedByEmail}</td>
+                                <td className="p-2 text-sm">{r.taskTitle || r.taskId}</td>
+                                <td className="p-2">{r.fromStatus}</td>
+                                <td className="p-2">{r.requestedStatus}</td>
+                                <td className="p-2">
+                                  <div className="flex gap-2">
+                                    <button onClick={() => approveRequest(r)} className="bg-green-600 text-white px-3 py-1 rounded text-sm">Approve</button>
+                                    <button onClick={() => rejectRequest(r)} className="bg-red-100 text-red-700 px-3 py-1 rounded text-sm">Reject</button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
           {/* Bulk Tasks Preview / Confirm */}
           {showBulkPreview && bulkPreviewRows && (
@@ -1038,7 +1244,13 @@ export default function AdminDashboard() {
                   </select>
 
                   <div className="flex gap-3">
-                    <button className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded">Add Task</button>
+                    <div className="flex items-center gap-3">
+                      <label className="inline-flex items-center gap-2">
+                        <input type="checkbox" checked={reminderOnAdd} onChange={(e) => setReminderOnAdd(e.target.checked)} />
+                        <span className="text-sm text-gray-600">Open reminder email after add</span>
+                      </label>
+                      <button className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded">Add Task</button>
+                    </div>
                     <button type="button" onClick={() => setShowAddTaskPanel(false)} className="bg-gray-100 px-4 py-2 rounded">Cancel</button>
                   </div>
                 </form>
@@ -1172,6 +1384,27 @@ export default function AdminDashboard() {
             </div>
           )}
 
+            {/* Edit User Modal */}
+            {showEditUserModal && (
+              <div className="fixed left-72 right-6 top-6 z-50 animate-slide-down">
+                <div className="bg-white p-6 rounded-2xl shadow-lg relative">
+                  <div className="absolute right-3 top-3">
+                    <button onClick={() => setShowEditUserModal(false)} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
+                  </div>
+                  <h2 className="text-xl font-semibold mb-4">✏️ Edit Member</h2>
+                  <form onSubmit={saveEditedUser}>
+                    <input type="text" placeholder="Name" className="border p-2 w-full mb-3 rounded" value={editUserName} onChange={(e) => setEditUserName(e.target.value)} required />
+                    <input type="email" placeholder="Email" className="border p-2 w-full mb-3 rounded" value={editUserEmail} onChange={(e) => setEditUserEmail(e.target.value)} required />
+                    <div className="flex gap-3">
+                      <button disabled={editing} className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded">Save</button>
+                      <button type="button" onClick={() => setShowEditUserModal(false)} className="bg-gray-100 px-4 py-2 rounded">Cancel</button>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-3">Note: Editing will update the member's name/email in Firestore and will update associated tasks' displayed name/email. This will not delete tasks or modify Auth accounts.</p>
+                  </form>
+                </div>
+              </div>
+            )}
+
       {/* 1) Evaluation + Analytics */}
       {activeView === "progress" && (
         <div className="bg-white p-6 rounded-2xl shadow-md mb-6 transition-all duration-300 ease-in-out transform">
@@ -1240,7 +1473,40 @@ export default function AdminDashboard() {
           </div>
 
           <div className="p-3 bg-gray-50 rounded-lg">
-            <DashboardAnalytics tasks={filteredTasksForGraph} />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <DashboardAnalytics tasks={filteredTasksForGraph} />
+              </div>
+              <div className="flex flex-col bg-white p-3 rounded h-full">
+                <h5 className="text-sm font-semibold mb-2">Overall Status Distribution</h5>
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie dataKey="value" data={pieData} innerRadius={40} outerRadius={60} paddingAngle={2} label={({ name, percent }) => `${name} (${Math.round(percent*100)}%)`}>
+                        {pieData.map((entry, idx) => (
+                          <Cell key={`cell-${idx}`} fill={["#10B981", "#F59E0B", "#EF4444", "#6B7280"][idx % 4]} />
+                        ))}
+                      </Pie>
+                      <Tooltip />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+
+                {/* Fill below the pie chart with recent task details so space is not empty */}
+                <div className="mt-3 overflow-auto">
+                  <h6 className="text-xs text-gray-500 mb-2">Recent Tasks</h6>
+                  <div className="space-y-2">
+                    {tasks.slice(0,6).map((t) => (
+                      <div key={t.id} className="p-2 border rounded text-sm">
+                        <div className="font-medium">{t.title}</div>
+                        <div className="text-xs text-gray-500">{t.assignedName || t.assignedEmail} • {formatDate(t.endDate)}</div>
+                      </div>
+                    ))}
+                    {tasks.length === 0 && <div className="text-xs text-gray-500">No tasks</div>}
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1285,7 +1551,10 @@ export default function AdminDashboard() {
                     <td className={`p-2 font-semibold ${u.role === "admin" ? "text-blue-600" : "text-green-600"}`}>{u.role}</td>
                     {showDeleteUsers && (
                       <td className="p-2">
-                        <button onClick={() => deleteUser(u.id, u.name || u.email, u.email)} className="text-sm bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded">Delete</button>
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => openEditUser(u)} className="text-sm bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded">Edit</button>
+                          <button onClick={() => deleteUser(u.uid || u.id, u.name || u.email, u.email)} className="text-sm bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded">Delete</button>
+                        </div>
                       </td>
                     )}
                   </tr>
@@ -1304,13 +1573,48 @@ export default function AdminDashboard() {
             <h2 className="text-xl font-semibold">📋 All Tasks</h2>
             <div className="flex items-center gap-3">
               <input value={filterName} onChange={(e) => setFilterName(e.target.value)} placeholder="Filter by name/email" className="px-3 py-1 rounded border text-sm" />
-              <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="px-3 py-1 rounded border text-sm">
-                <option value="all">All status</option>
-                <option value="completed">completed</option>
-                <option value="in process">in process</option>
-                <option value="delayed">delayed</option>
-                <option value="cancelled">cancelled</option>
-              </select>
+              <div className="flex items-center gap-2">
+                <label className="text-sm"><input type="checkbox" checked={selectedStatuses.has('all')} onChange={() => {
+                  // toggle all
+                  setSelectedStatuses(new Set(['all']));
+                }} /> <span className="ml-2">All</span></label>
+                <label className="text-sm"><input type="checkbox" checked={selectedStatuses.has('completed')} onChange={() => {
+                  setSelectedStatuses((prev) => {
+                    const ns = new Set(prev);
+                    if (ns.has('all')) ns.delete('all');
+                    if (ns.has('completed')) ns.delete('completed'); else ns.add('completed');
+                    if (ns.size === 0) ns.add('all');
+                    return ns;
+                  });
+                }} /> <span className="ml-2">Completed</span></label>
+                <label className="text-sm"><input type="checkbox" checked={selectedStatuses.has('in process')} onChange={() => {
+                  setSelectedStatuses((prev) => {
+                    const ns = new Set(prev);
+                    if (ns.has('all')) ns.delete('all');
+                    if (ns.has('in process')) ns.delete('in process'); else ns.add('in process');
+                    if (ns.size === 0) ns.add('all');
+                    return ns;
+                  });
+                }} /> <span className="ml-2">In process</span></label>
+                <label className="text-sm"><input type="checkbox" checked={selectedStatuses.has('delayed')} onChange={() => {
+                  setSelectedStatuses((prev) => {
+                    const ns = new Set(prev);
+                    if (ns.has('all')) ns.delete('all');
+                    if (ns.has('delayed')) ns.delete('delayed'); else ns.add('delayed');
+                    if (ns.size === 0) ns.add('all');
+                    return ns;
+                  });
+                }} /> <span className="ml-2">Delayed</span></label>
+                <label className="text-sm"><input type="checkbox" checked={selectedStatuses.has('cancelled')} onChange={() => {
+                  setSelectedStatuses((prev) => {
+                    const ns = new Set(prev);
+                    if (ns.has('all')) ns.delete('all');
+                    if (ns.has('cancelled')) ns.delete('cancelled'); else ns.add('cancelled');
+                    if (ns.size === 0) ns.add('all');
+                    return ns;
+                  });
+                }} /> <span className="ml-2">Cancelled</span></label>
+              </div>
               <button onClick={() => setShowDeleteTasks((s) => !s)} className={`text-sm px-3 py-1 rounded ${showDeleteTasks ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-700"}`}>{showDeleteTasks ? "Exit delete" : "Enable delete"}</button>
             </div>
           </div>
@@ -1325,7 +1629,7 @@ export default function AdminDashboard() {
                 filterName.trim() === "" ||
                 (task.assignedName && task.assignedName.toLowerCase().includes(filterName.toLowerCase())) ||
                 (task.assignedEmail && task.assignedEmail.toLowerCase().includes(filterName.toLowerCase()));
-              const statusMatch = filterStatus === "all" || canonicalStatus(task.status) === filterStatus;
+              const statusMatch = (selectedStatuses.has('all')) || selectedStatuses.has(canonicalStatus(task.status));
               return nameMatch && statusMatch;
             });
 
