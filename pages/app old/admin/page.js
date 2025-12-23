@@ -93,6 +93,33 @@ export default function AdminDashboard() {
   // approvals list
   const [showApprovalsPanel, setShowApprovalsPanel] = useState(false);
   const [approvals, setApprovals] = useState([]);
+  // Task closing feature state
+  const [showTaskClosingPanel, setShowTaskClosingPanel] = useState(false);
+  const [selectedMemberForClosing, setSelectedMemberForClosing] = useState("");
+  const [marksDraft, setMarksDraft] = useState({});
+  const [savingMarkTaskId, setSavingMarkTaskId] = useState("");
+  // Quality of Work panel state
+  const [showQualityPanel, setShowQualityPanel] = useState(false);
+  const [selectedMemberForQuality, setSelectedMemberForQuality] = useState("");
+  // Manager panel state
+  const [showManagerPanel, setShowManagerPanel] = useState(false);
+  const [selectedMemberForManager, setSelectedMemberForManager] = useState("");
+  const [managerBehaviorDate, setManagerBehaviorDate] = useState("");
+  const [managerBehaviorMarks, setManagerBehaviorMarks] = useState("");
+  const [managerBehaviorRemarks, setManagerBehaviorRemarks] = useState("");
+  const [savingBehaviorMark, setSavingBehaviorMark] = useState(false);
+  const [behaviorData, setBehaviorData] = useState({}); // { userId_date: { marks, remarks, timestamp } }
+  // Attendance feature state
+  const [showAttendancePanel, setShowAttendancePanel] = useState(false);
+  const [selectedMemberForAttendance, setSelectedMemberForAttendance] = useState("");
+  const [attendanceData, setAttendanceData] = useState({}); // { userId_date: "present"|"absent"|"off" }
+  const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
+  const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
+  const [savingAttendance, setSavingAttendance] = useState(false);
+  // Bulk attendance state
+  const [bulkAttendanceDate, setBulkAttendanceDate] = useState("");
+  const [bulkAttendanceAction, setBulkAttendanceAction] = useState("present");
+  const [applyingBulkAttendance, setApplyingBulkAttendance] = useState(false);
 
   useEffect(() => {
     let hideTimer = null;
@@ -250,6 +277,327 @@ export default function AdminDashboard() {
     return "bg-gray-100 text-black";
   };
 
+  // Completed tasks derived from realtime `tasks`
+  const completedTasks = useMemo(() => {
+    return (tasks || []).filter((t) => {
+      const s = canonicalStatus(t.status || t.actualStatus || "");
+      return s === "completed";
+    });
+  }, [tasks]);
+
+  // Resolve member name by uid/email
+  const memberNameByTask = (t) => {
+    if (t.assignedName) return t.assignedName;
+    const uid = t.assignedTo;
+    const email = t.assignedEmail;
+    const u = users.find((x) => x.uid === uid || x.id === uid || x.email === email);
+    return u ? (u.name || u.email || u.uid || u.id) : (email || uid || "Unknown");
+  };
+
+  // Per-member total out of 100 = sum of closing marks normalized to 100
+  const memberSummaries = useMemo(() => {
+    const grouped = {};
+    completedTasks.forEach((t) => {
+      const key = t.assignedTo || t.assignedEmail || "unassigned";
+      if (!grouped[key]) grouped[key] = { key, marks: [], count: 0 };
+      grouped[key].count += 1;
+      if (typeof t.closingMark === "number") grouped[key].marks.push(t.closingMark);
+    });
+    return Object.values(grouped).map((g) => {
+      const sum = g.marks.reduce((a, b) => a + b, 0);
+      const denom = g.marks.length * 100;
+      const totalScaled = denom > 0 ? Math.round((sum / denom) * 100) : 0; // out of 100
+      const labelUser = users.find((x) => x.uid === g.key || x.id === g.key || x.email === g.key);
+      const name = labelUser ? (labelUser.name || labelUser.email) : g.key;
+      return { idOrEmail: g.key, name, totalOutOf100: totalScaled, tasksCompleted: g.count };
+    });
+  }, [completedTasks, users]);
+
+  // Selected member detailed summary (scaled and raw obtained/total)
+  const selectedMemberSummary = useMemo(() => {
+    if (!selectedMemberForClosing) return null;
+    const list = completedTasks.filter(
+      (t) => t.assignedTo === selectedMemberForClosing || t.assignedEmail === selectedMemberForClosing
+    );
+    const marked = list.filter((t) => typeof t.closingMark === "number");
+    const sum = marked.reduce((a, t) => a + (t.closingMark || 0), 0);
+    const denom = marked.length * 100;
+    const scaled = denom > 0 ? Math.round((sum / denom) * 100) : 0;
+    const labelUser = users.find((x) => x.uid === selectedMemberForClosing || x.id === selectedMemberForClosing || x.email === selectedMemberForClosing);
+    const name = labelUser ? (labelUser.name || labelUser.email) : selectedMemberForClosing;
+    return { name, sum, denom, scaled, markedCount: marked.length, completedCount: list.length };
+  }, [selectedMemberForClosing, completedTasks, users]);
+
+  const openTaskClosingPanel = () => {
+    setShowTaskClosingPanel(true);
+  };
+  const closeTaskClosingPanel = () => {
+    setShowTaskClosingPanel(false);
+    setSelectedMemberForClosing("");
+    setMarksDraft({});
+    setSavingMarkTaskId("");
+  };
+
+  const openQualityPanel = () => {
+    setShowQualityPanel(true);
+  };
+  const closeQualityPanel = () => {
+    setShowQualityPanel(false);
+    setSelectedMemberForQuality("");
+  };
+
+  const openManagerPanel = async () => {
+    setShowManagerPanel(true);
+    // Load behavior data from Firestore
+    try {
+      const behaviorSnap = await getDocs(collection(db, "behaviorMarks"));
+      const data = {};
+      behaviorSnap.forEach((doc) => {
+        data[doc.id] = doc.data();
+      });
+      setBehaviorData(data);
+    } catch (err) {
+      console.error("Failed to load behavior marks:", err);
+    }
+  };
+  
+  const closeManagerPanel = () => {
+    setShowManagerPanel(false);
+    setSelectedMemberForManager("");
+    setManagerBehaviorDate("");
+    setManagerBehaviorMarks("");
+    setManagerBehaviorRemarks("");
+  };
+
+  const saveBehaviorMark = async () => {
+    if (!selectedMemberForManager) {
+      alert("Please select a member");
+      return;
+    }
+    if (!managerBehaviorDate) {
+      alert("Please select a date");
+      return;
+    }
+    const marks = Number(managerBehaviorMarks);
+    if (isNaN(marks) || marks < 0 || marks > 100) {
+      alert("Please enter valid marks between 0 and 100");
+      return;
+    }
+
+    const key = `${selectedMemberForManager}_${managerBehaviorDate}`;
+    try {
+      setSavingBehaviorMark(true);
+      await setDoc(doc(db, "behaviorMarks", key), {
+        userId: selectedMemberForManager,
+        date: managerBehaviorDate,
+        marks: marks,
+        remarks: managerBehaviorRemarks,
+        markedAt: serverTimestamp(),
+      });
+      setBehaviorData((prev) => ({
+        ...prev,
+        [key]: { marks, remarks: managerBehaviorRemarks, date: managerBehaviorDate },
+      }));
+      alert("✓ Behavior mark saved successfully");
+      setManagerBehaviorMarks("");
+      setManagerBehaviorRemarks("");
+    } catch (err) {
+      console.error("Failed to save behavior mark:", err);
+      alert("Failed to save: " + (err?.message || err));
+    } finally {
+      setSavingBehaviorMark(false);
+    }
+  };
+
+  const calculateBehaviorScore = (userId) => {
+    const userMarks = Object.entries(behaviorData)
+      .filter(([key]) => key.startsWith(`${userId}_`))
+      .map(([_, data]) => data.marks);
+    if (userMarks.length === 0) return 0;
+    const sum = userMarks.reduce((a, b) => a + b, 0);
+    return Math.round(sum / userMarks.length);
+  };
+
+  const getMemberBehaviorRecords = (userId) => {
+    return Object.entries(behaviorData)
+      .filter(([key]) => key.startsWith(`${userId}_`))
+      .map(([key, data]) => ({
+        date: data.date,
+        marks: data.marks,
+        remarks: data.remarks,
+      }))
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+  };
+
+  const saveTaskMark = async (taskId, value) => {
+    const markNum = Number(value);
+    if (Number.isNaN(markNum) || markNum < 0 || markNum > 100) {
+      alert("Please enter a valid mark between 0 and 100");
+      return;
+    }
+    try {
+      setSavingMarkTaskId(taskId);
+      await updateDoc(doc(db, "tasks", taskId), { closingMark: markNum, closingMarkedAt: serverTimestamp() });
+      setMarksDraft((prev) => ({ ...prev, [taskId]: markNum }));
+    } catch (err) {
+      alert("Failed to save mark: " + (err?.message || err));
+    } finally {
+      setSavingMarkTaskId("");
+    }
+  };
+
+  // Attendance helpers
+  const getHolidays = (month, year) => {
+    const holidays = [];
+    // Christmas
+    if (month === 11) holidays.push({ date: 25, name: "Christmas" });
+    // New Year
+    if (month === 0) holidays.push({ date: 1, name: "New Year" });
+    // Islamic holidays (approximate - 2025/2026)
+    if (year === 2025 && month === 2) holidays.push({ date: 31, name: "Eid al-Fitr" });
+    if (year === 2025 && month === 5) holidays.push({ date: 7, name: "Eid al-Adha" });
+    if (year === 2026 && month === 2) holidays.push({ date: 20, name: "Eid al-Fitr" });
+    if (year === 2026 && month === 4) holidays.push({ date: 27, name: "Eid al-Adha" });
+    return holidays;
+  };
+
+  const generateCalendarDays = (month, year) => {
+    const firstDay = new Date(year, month, 1);
+    const lastDay = new Date(year, month + 1, 0);
+    const days = [];
+    const holidays = getHolidays(month, year);
+    for (let d = 1; d <= lastDay.getDate(); d++) {
+      const date = new Date(year, month, d);
+      const dayOfWeek = date.getDay();
+      const holiday = holidays.find(h => h.date === d);
+      days.push({
+        date: d,
+        dayName: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][dayOfWeek],
+        isSunday: dayOfWeek === 0,
+        holiday: holiday?.name || null,
+        fullDate: `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+      });
+    }
+    return days;
+  };
+
+  const openAttendancePanel = async () => {
+    setShowAttendancePanel(true);
+    // Fetch attendance from Firestore
+    try {
+      const attendanceSnap = await getDocs(collection(db, "attendance"));
+      const data = {};
+      attendanceSnap.forEach((doc) => {
+        data[doc.id] = doc.data().status;
+      });
+      setAttendanceData(data);
+    } catch (err) {
+      console.error("Failed to load attendance:", err);
+    }
+  };
+
+  const closeAttendancePanel = () => {
+    setShowAttendancePanel(false);
+    setSelectedMemberForAttendance("");
+  };
+
+  const markAttendance = async (userId, dateStr, status) => {
+    const key = `${userId}_${dateStr}`;
+    try {
+      setSavingAttendance(true);
+      await setDoc(doc(db, "attendance", key), {
+        userId,
+        date: dateStr,
+        status,
+        markedAt: serverTimestamp()
+      });
+      setAttendanceData((prev) => ({ ...prev, [key]: status }));
+    } catch (err) {
+      alert("Failed to mark attendance: " + (err?.message || err));
+    } finally {
+      setSavingAttendance(false);
+    }
+  };
+
+  const applyBulkAttendance = async () => {
+    if (!bulkAttendanceDate) {
+      alert("Please select a date first");
+      return;
+    }
+    
+    const confirmed = window.confirm(
+      `Are you sure you want to mark ALL employees as "${bulkAttendanceAction.toUpperCase()}" for ${bulkAttendanceDate}?`
+    );
+    
+    if (!confirmed) return;
+    
+    try {
+      setApplyingBulkAttendance(true);
+      const batch = writeBatch(db);
+      let count = 0;
+      
+      users.forEach((user) => {
+        const userId = user.uid || user.id;
+        const key = `${userId}_${bulkAttendanceDate}`;
+        const docRef = doc(db, "attendance", key);
+        batch.set(docRef, {
+          userId,
+          date: bulkAttendanceDate,
+          status: bulkAttendanceAction,
+          markedAt: serverTimestamp(),
+          bulkMarked: true
+        });
+        count++;
+      });
+      
+      await batch.commit();
+      
+      // Update local state
+      const updates = {};
+      users.forEach((user) => {
+        const userId = user.uid || user.id;
+        const key = `${userId}_${bulkAttendanceDate}`;
+        updates[key] = bulkAttendanceAction;
+      });
+      setAttendanceData((prev) => ({ ...prev, ...updates }));
+      
+      alert(`✓ Successfully marked ${count} employees as "${bulkAttendanceAction}" for ${bulkAttendanceDate}`);
+      setBulkAttendanceDate("");
+    } catch (err) {
+      console.error("Bulk attendance error:", err);
+      alert("Failed to apply bulk attendance: " + (err?.message || err));
+    } finally {
+      setApplyingBulkAttendance(false);
+    }
+  };
+
+  const calculateAttendancePercentage = (userId) => {
+    const days = generateCalendarDays(currentMonth, currentYear);
+    const workingDays = days.filter(d => !d.isSunday && !d.holiday);
+    let considered = 0;
+    let present = 0;
+    workingDays.forEach(day => {
+      const key = `${userId}_${day.fullDate}`;
+      const status = attendanceData[key];
+      if (status === "present") {
+        considered++;
+        present++;
+      } else if (status === "absent") {
+        considered++;
+      }
+      // "off" is excluded from calculation
+    });
+    return considered > 0 ? Math.round((present / considered) * 100) : 0;
+  };
+
+  const attendanceSummaries = useMemo(() => {
+    return users.map(u => {
+      const uid = u.uid || u.id;
+      const percentage = calculateAttendancePercentage(uid);
+      return { uid, name: u.name || u.email, percentage };
+    });
+  }, [users, attendanceData, currentMonth, currentYear]);
+
   // 🔹 Add Task (assign by dropdown or email + start & end dates + priority)
   const addTask = async (e) => {
     e.preventDefault();
@@ -310,7 +658,7 @@ export default function AdminDashboard() {
       if (reminderOnAdd && typeof window !== 'undefined') {
         const to = employee.email || "";
         const subject = `New Task Assigned: ${title}`;
-        const body = `Hello ${employee.name || ''},\n\nYou have been assigned a new task:\n\nTitle: ${title}\nStart: ${formatDate(sDate)}\nEnd: ${formatDate(eDate)}\nPriority: ${priority}\n\nPlease acknowledge this task.\n\nRegards,\nAdmin`;
+        const body = `Hello ${employee.name || ''},\n\nYou have been assigned a new task:\n\nTitle: ${title}\nStart: ${formatDate(sDate)}\nEnd: ${formatDate(eDate)}\nPriority: ${priority}\n\nPlease acknowledge this task.\n\nRegard\nQuality Manager\nShahid Ali`;
         const outlookUrl = `https://outlook.office.com/mail/deeplink/compose?to=${encodeURIComponent(to)}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
         window.open(outlookUrl, "_blank");
       }
@@ -777,7 +1125,7 @@ export default function AdminDashboard() {
       active.forEach((r) => {
         if (!selectedReminderIds.has(r.taskId)) return;
         const daysText = typeof r.daysLeft === "number" ? `${r.daysLeft} day(s)` : "N/A";
-        const message = `Reminder: Task "${r.taskTitle}" is due in ${daysText}. Please complete it.`;
+        const message = `Reminder: Task "${r.taskTitle}" is due in ${daysText}. Please complete it.\n\nRegard\nQuality Manager\nShahid Ali`;
         const payload = {
           taskId: r.taskId,
           recipientUid: r.assignedUid || null,
@@ -820,7 +1168,7 @@ export default function AdminDashboard() {
 
     const to = Array.from(emails).join(";");
     const subject = `Task Reminder: ${subjects.slice(0,3).join("; ")}`;
-    const body = `Dear team,\n\nYou have tasks to review:\n\n${bodies.join("")}\nPlease address them as appropriate.\n\nRegards,\nAdmin`;
+    const body = `Dear team,\n\nYou have tasks to review:\n\n${bodies.join("")}\nPlease address them as appropriate.\n\nRegard\nQuality Manager\nShahid Ali`;
     // Outlook deeplink compose (web): open compose with prefilled fields
     const outlookUrl = `https://outlook.office.com/mail/deeplink/compose?to=${encodeURIComponent(to)}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
     window.open(outlookUrl, "_blank");
@@ -882,6 +1230,14 @@ export default function AdminDashboard() {
             <div className="sidebar-divider" />
 
             <div className="mt-4 text-sm text-white/80 px-2">
+              <p className="mb-2 font-medium">Features</p>
+              <div className="flex flex-col gap-2 mb-4">
+                <button onClick={openTaskClosingPanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">Task closing</button>
+                <button onClick={openAttendancePanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">Attendence</button>
+                <button onClick={openQualityPanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">Quality of work</button>
+                <button onClick={openManagerPanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">Manager</button>
+                <button className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">KPI</button>
+              </div>
               <p className="mb-1">Quick Actions</p>
                 <div className="flex flex-col gap-2">
                 <button onClick={() => { setShowDeleteUsers((s) => !s); }} className="text-sm px-3 py-2 rounded bg-white/6">Toggle Delete Users</button>
@@ -910,8 +1266,7 @@ export default function AdminDashboard() {
           {showWelcome && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
               <div className={`bg-white rounded-2xl p-8 max-w-xl mx-4 text-center transform transition-all duration-500 ${welcomeVisible ? "opacity-100 translate-y-0 scale-100" : "opacity-0 translate-y-6 scale-95"}`}>
-                <h2 className="text-2xl md:text-3xl font-bold mb-2">Good Afternoon Mr.Ammar</h2>
-                <p className="text-gray-600">Your efforts is the backbone of the workplace</p>
+                <h2 className="text-2xl md:text-3xl font-bold mb-2">{new Date().getHours() >= 12 ? 'Good Afternoon' : 'Good Morning'}</h2>
               </div>
             </div>
           )}
@@ -954,6 +1309,684 @@ export default function AdminDashboard() {
                             ))}
                           </tbody>
                         </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {showAttendancePanel && (
+                <div className="fixed left-72 right-6 top-6 z-50 animate-slide-down max-h-[90vh] overflow-auto">
+                  <div className="bg-white p-6 rounded-2xl shadow-lg relative">
+                    <div className="absolute right-3 top-3 flex gap-2">
+                      <button onClick={closeAttendancePanel} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
+                    </div>
+                    <h2 className="text-xl font-semibold mb-4">📅 Attendance Management</h2>
+                    
+                    <div className="flex gap-4 mb-4 items-center">
+                      <button onClick={() => {
+                        if (currentMonth === 0) { setCurrentMonth(11); setCurrentYear(currentYear - 1); }
+                        else setCurrentMonth(currentMonth - 1);
+                      }} className="px-3 py-1 bg-gray-100 rounded">← Prev</button>
+                      <h3 className="text-lg font-bold">{new Date(currentYear, currentMonth).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</h3>
+                      <button onClick={() => {
+                        if (currentMonth === 11) { setCurrentMonth(0); setCurrentYear(currentYear + 1); }
+                        else setCurrentMonth(currentMonth + 1);
+                      }} className="px-3 py-1 bg-gray-100 rounded">Next →</button>
+                    </div>
+
+                    {/* Smart Bulk Attendance System */}
+                    <div className="mb-6 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg border-2 border-blue-200">
+                      <h3 className="text-md font-bold mb-3 text-blue-900 flex items-center gap-2">
+                        <span>⚡</span>
+                        <span>Smart Bulk Attendance</span>
+                      </h3>
+                      <p className="text-xs text-gray-600 mb-3">Mark all employees' attendance at once for a selected date</p>
+                      <div className="flex flex-wrap gap-3 items-end">
+                        <div className="flex-1 min-w-[200px]">
+                          <label className="block text-sm font-semibold mb-1 text-gray-700">Select Date</label>
+                          <input
+                            type="date"
+                            value={bulkAttendanceDate}
+                            onChange={(e) => setBulkAttendanceDate(e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-blue-400"
+                          />
+                        </div>
+                        <div className="flex-1 min-w-[150px]">
+                          <label className="block text-sm font-semibold mb-1 text-gray-700">Select Action</label>
+                          <select
+                            value={bulkAttendanceAction}
+                            onChange={(e) => setBulkAttendanceAction(e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-blue-400"
+                          >
+                            <option value="present">Present</option>
+                            <option value="absent">Absent</option>
+                            <option value="off">Off</option>
+                          </select>
+                        </div>
+                        <button
+                          onClick={applyBulkAttendance}
+                          disabled={applyingBulkAttendance || !bulkAttendanceDate}
+                          className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors duration-200 shadow-md hover:shadow-lg"
+                        >
+                          {applyingBulkAttendance ? (
+                            <span className="flex items-center gap-2">
+                              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                              </svg>
+                              <span>Applying...</span>
+                            </span>
+                          ) : (
+                            `Apply to All (${users.length} employees)`
+                          )}
+                        </button>
+                      </div>
+                      <div className="mt-3 text-xs text-gray-600">
+                        <span className="font-semibold">Note:</span> This will mark attendance for all employees in the system. Individual employees can still be adjusted later.
+                      </div>
+                    </div>
+
+                    <div className="mb-6">
+                      <label className="block text-sm font-semibold mb-1">Filter by member</label>
+                      <select
+                        value={selectedMemberForAttendance}
+                        onChange={(e) => setSelectedMemberForAttendance(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                      >
+                        <option value="">All members</option>
+                        {users.map((u) => (
+                          <option key={u.uid || u.id} value={u.uid || u.id}>
+                            {u.name || u.email}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {!selectedMemberForAttendance && (
+                      <div className="mb-6">
+                        <h3 className="text-lg font-bold mb-2">Members — Attendance %</h3>
+                        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                          {attendanceSummaries.map((m) => (
+                            <div key={m.uid} className="border rounded-lg p-4 cursor-pointer hover:bg-gray-50" onClick={() => setSelectedMemberForAttendance(m.uid)}>
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <p className="font-semibold">{m.name}</p>
+                                  <p className="text-xs text-gray-500">Click to mark attendance</p>
+                                </div>
+                                <div className="text-2xl font-bold text-blue-600">{m.percentage}%</div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedMemberForAttendance && (
+                      <div>
+                        <div className="mb-4 p-4 bg-blue-50 rounded-lg">
+                          <h3 className="font-bold text-lg">{users.find(u => (u.uid || u.id) === selectedMemberForAttendance)?.name || 'Member'}</h3>
+                          <p className="text-sm text-gray-600">Attendance: <span className="font-bold text-blue-600">{calculateAttendancePercentage(selectedMemberForAttendance)}%</span></p>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="min-w-full text-sm">
+                            <thead>
+                              <tr className="bg-gray-100">
+                                <th className="p-2 text-left">Date</th>
+                                <th className="p-2 text-left">Day</th>
+                                <th className="p-2 text-left">Holiday/Status</th>
+                                <th className="p-2 text-left">Mark Attendance</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {generateCalendarDays(currentMonth, currentYear).map((day) => {
+                                const key = `${selectedMemberForAttendance}_${day.fullDate}`;
+                                const status = attendanceData[key];
+                                const isWeekend = day.isSunday;
+                                const isHoliday = !!day.holiday;
+                                return (
+                                  <tr key={day.date} className={`border-b ${isWeekend ? 'bg-gray-50' : ''} ${isHoliday ? 'bg-yellow-50' : ''}`}>
+                                    <td className="p-2">{day.date}</td>
+                                    <td className="p-2">{day.dayName}</td>
+                                    <td className="p-2">
+                                      {day.holiday && <span className="text-xs bg-yellow-200 px-2 py-1 rounded">{day.holiday}</span>}
+                                      {isWeekend && !day.holiday && <span className="text-xs bg-gray-200 px-2 py-1 rounded">Sunday</span>}
+                                      {!isWeekend && !day.holiday && status && (
+                                        <span className={`text-xs px-2 py-1 rounded ${
+                                          status === 'present' ? 'bg-green-100 text-green-700' :
+                                          status === 'absent' ? 'bg-red-100 text-red-700' :
+                                          'bg-blue-100 text-blue-700'
+                                        }`}>{status}</span>
+                                      )}
+                                    </td>
+                                    <td className="p-2">
+                                      {!isWeekend && !day.holiday && (
+                                        <div className="flex gap-1">
+                                          <button
+                                            onClick={() => markAttendance(selectedMemberForAttendance, day.fullDate, 'present')}
+                                            className={`text-xs px-2 py-1 rounded ${status === 'present' ? 'bg-green-600 text-white' : 'bg-green-100 text-green-700'}`}
+                                            disabled={savingAttendance}
+                                          >
+                                            Present
+                                          </button>
+                                          <button
+                                            onClick={() => markAttendance(selectedMemberForAttendance, day.fullDate, 'absent')}
+                                            className={`text-xs px-2 py-1 rounded ${status === 'absent' ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}
+                                            disabled={savingAttendance}
+                                          >
+                                            Absent
+                                          </button>
+                                          <button
+                                            onClick={() => markAttendance(selectedMemberForAttendance, day.fullDate, 'off')}
+                                            className={`text-xs px-2 py-1 rounded ${status === 'off' ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-700'}`}
+                                            disabled={savingAttendance}
+                                          >
+                                            Off
+                                          </button>
+                                        </div>
+                                      )}
+                                      {(isWeekend || isHoliday) && <span className="text-xs text-gray-400">—</span>}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+                {showTaskClosingPanel && (
+                  <div className="fixed left-72 right-6 top-6 z-50 animate-slide-down">
+                    <div className="bg-white p-6 rounded-2xl shadow-lg relative">
+                      <div className="absolute right-3 top-3 flex gap-2">
+                        <button onClick={closeTaskClosingPanel} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
+                      </div>
+                      <h2 className="text-xl font-semibold mb-4">📋 Task Closing</h2>
+                      <div className="grid gap-4 md:grid-cols-3 mb-4">
+                        <div className="md:col-span-2">
+                          <label className="block text-sm font-semibold mb-1">Filter by member</label>
+                          <select
+                            value={selectedMemberForClosing}
+                            onChange={(e) => setSelectedMemberForClosing(e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                          >
+                            <option value="">All members</option>
+                            {users.map((u) => (
+                              <option key={u.uid || u.id || u.email} value={u.uid || u.id || u.email}>
+                                {u.name || u.email || u.uid || u.id}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3">
+                          <p className="text-sm text-indigo-700">Each task is marked out of 100. Member total is the sum of their task marks, normalized back to 100.</p>
+                        </div>
+                      </div>
+
+                      {selectedMemberSummary && (
+                        <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-3 flex items-center justify-between">
+                          <div>
+                            <p className="font-semibold">{selectedMemberSummary.name}</p>
+                            <p className="text-sm text-blue-700">Overall: {selectedMemberSummary.scaled}/100 ({selectedMemberSummary.sum}/{selectedMemberSummary.denom}) — Marked {selectedMemberSummary.markedCount} of {selectedMemberSummary.completedCount} completed tasks</p>
+                          </div>
+                          <button onClick={() => setSelectedMemberForClosing("")} className="text-sm px-3 py-1 rounded bg-white border border-blue-200 hover:bg-blue-100">Clear</button>
+                        </div>
+                      )}
+
+                      {!selectedMemberForClosing && (
+                        <div className="mb-6">
+                          <h3 className="text-lg font-bold mb-2">Members — Total (out of 100)</h3>
+                          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                            {memberSummaries.map((m) => (
+                              <div
+                                key={m.idOrEmail}
+                                onClick={() => setSelectedMemberForClosing(m.idOrEmail)}
+                                className="border rounded-lg p-4 cursor-pointer hover:bg-gray-50"
+                              >
+                                <div className="flex items-center justify-between">
+                                  <div>
+                                    <p className="font-semibold">{m.name}</p>
+                                    <p className="text-xs text-gray-500">Completed: {m.tasksCompleted}</p>
+                                  </div>
+                                  <div className="text-right">
+                                    <div className="text-2xl font-bold text-indigo-600">{m.totalOutOf100}</div>
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); setSelectedMemberForClosing(m.idOrEmail); }}
+                                      className="mt-1 text-xs text-indigo-700 hover:underline"
+                                    >
+                                      Details
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-sm">
+                          <thead>
+                            <tr className="bg-gray-100">
+                              <th className="p-2 text-left">Title</th>
+                              <th className="p-2 text-left">Assigned</th>
+                              <th className="p-2 text-left">Status</th>
+                              <th className="p-2 text-left">Mark (0-100)</th>
+                              <th className="p-2 text-left">Action</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {completedTasks
+                              .filter((t) => !selectedMemberForClosing || t.assignedTo === selectedMemberForClosing || t.assignedEmail === selectedMemberForClosing)
+                              .map((task) => (
+                                <tr key={task.id} className="border-b">
+                                  <td className="p-2">{task.title}</td>
+                                  <td className="p-2">{memberNameByTask(task)}</td>
+                                  <td className="p-2"><span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">completed</span></td>
+                                  <td className="p-2">
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      max="100"
+                                      value={(marksDraft[task.id] ?? task.closingMark ?? "")}
+                                      onChange={(e) => setMarksDraft((prev) => ({ ...prev, [task.id]: e.target.value }))}
+                                      className="w-24 px-2 py-1 border border-gray-300 rounded"
+                                      placeholder="0-100"
+                                    />
+                                  </td>
+                                  <td className="p-2">
+                                    <button
+                                      onClick={() => saveTaskMark(task.id, marksDraft[task.id] ?? task.closingMark ?? 0)}
+                                      className="text-indigo-600 hover:text-indigo-800 font-semibold text-xs"
+                                      disabled={savingMarkTaskId === task.id}
+                                    >
+                                      {savingMarkTaskId === task.id ? "Saving..." : "Save"}
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                          </tbody>
+                        </table>
+                        {completedTasks.filter((t) => !selectedMemberForClosing || t.assignedTo === selectedMemberForClosing || t.assignedEmail === selectedMemberForClosing).length === 0 && (
+                          <p className="p-4 text-center text-gray-500">No completed tasks for this selection</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+              {/* Quality of Work Panel */}
+              {showQualityPanel && (
+                <div className="fixed left-72 right-6 top-6 z-50 animate-slide-down max-h-[90vh] overflow-auto">
+                  <div className="bg-white p-6 rounded-2xl shadow-lg relative">
+                    <div className="absolute right-3 top-3 flex gap-2">
+                      <button onClick={closeQualityPanel} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
+                    </div>
+                    <h2 className="text-xl font-semibold mb-4">⭐ Quality of Work Assessment</h2>
+                    
+                    {!selectedMemberForQuality ? (
+                      <div>
+                        <div className="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                          <p className="text-sm text-blue-800">
+                            <span className="font-semibold">Note:</span> Each member's total score is normalized to 100 marks, regardless of the number of completed tasks.
+                          </p>
+                        </div>
+                        
+                        <h3 className="text-lg font-bold mb-3">📊 Members Quality Score (Out of 100)</h3>
+                        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                          {memberSummaries.map((m) => (
+                            <div
+                              key={m.idOrEmail}
+                              onClick={() => setSelectedMemberForQuality(m.idOrEmail)}
+                              className="border-2 rounded-lg p-4 cursor-pointer hover:bg-blue-50 hover:border-blue-400 transition-all duration-200 shadow-sm hover:shadow-md"
+                            >
+                              <div className="flex items-center justify-between mb-2">
+                                <div className="flex-1">
+                                  <p className="font-semibold text-gray-800">{m.name}</p>
+                                  <p className="text-xs text-gray-500">Completed Tasks: {m.tasksCompleted}</p>
+                                </div>
+                                <div className="text-right">
+                                  <div className="text-3xl font-bold text-indigo-600">{m.totalOutOf100}</div>
+                                  <p className="text-xs text-gray-500">/ 100</p>
+                                </div>
+                              </div>
+                              <div className="mt-2">
+                                <div className="w-full bg-gray-200 rounded-full h-2">
+                                  <div 
+                                    className="bg-gradient-to-r from-indigo-500 to-purple-600 h-2 rounded-full transition-all duration-500"
+                                    style={{ width: `${m.totalOutOf100}%` }}
+                                  ></div>
+                                </div>
+                              </div>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setSelectedMemberForQuality(m.idOrEmail); }}
+                                className="mt-3 w-full text-xs text-indigo-700 hover:text-indigo-900 font-semibold bg-indigo-50 hover:bg-indigo-100 py-2 rounded"
+                              >
+                                View Details & Mark Tasks →
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        {memberSummaries.length === 0 && (
+                          <p className="text-center text-gray-500 py-8">No completed tasks available for quality assessment</p>
+                        )}
+                      </div>
+                    ) : (
+                      <div>
+                        {(() => {
+                          const memberData = memberSummaries.find(m => m.idOrEmail === selectedMemberForQuality);
+                          const memberTasks = completedTasks.filter(
+                            (t) => t.assignedTo === selectedMemberForQuality || t.assignedEmail === selectedMemberForQuality
+                          );
+                          const markedTasks = memberTasks.filter(t => typeof t.closingMark === 'number');
+                          const totalMarks = markedTasks.reduce((sum, t) => sum + (t.closingMark || 0), 0);
+                          const avgMark = markedTasks.length > 0 ? (totalMarks / markedTasks.length).toFixed(1) : 0;
+                          
+                          return (
+                            <>
+                              <div className="mb-6 bg-gradient-to-r from-indigo-50 to-purple-50 border-2 border-indigo-200 rounded-lg p-4">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex-1">
+                                    <h3 className="text-xl font-bold text-gray-800">{memberData?.name || 'Member'}</h3>
+                                    <div className="flex gap-4 mt-2 text-sm">
+                                      <p className="text-gray-600">Completed Tasks: <span className="font-semibold text-gray-800">{memberTasks.length}</span></p>
+                                      <p className="text-gray-600">Marked Tasks: <span className="font-semibold text-gray-800">{markedTasks.length}</span></p>
+                                      <p className="text-gray-600">Average Score: <span className="font-semibold text-gray-800">{avgMark}/100</span></p>
+                                    </div>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="text-sm text-gray-600 mb-1">Quality Score</p>
+                                    <div className="text-4xl font-bold text-indigo-600">{memberData?.totalOutOf100 || 0}</div>
+                                    <p className="text-sm text-gray-500">/ 100</p>
+                                  </div>
+                                </div>
+                                <div className="mt-3">
+                                  <div className="w-full bg-gray-200 rounded-full h-3">
+                                    <div 
+                                      className="bg-gradient-to-r from-indigo-500 to-purple-600 h-3 rounded-full transition-all duration-500"
+                                      style={{ width: `${memberData?.totalOutOf100 || 0}%` }}
+                                    ></div>
+                                  </div>
+                                </div>
+                                <button 
+                                  onClick={() => setSelectedMemberForQuality('')} 
+                                  className="mt-3 text-sm text-indigo-700 hover:text-indigo-900 font-semibold flex items-center gap-1"
+                                >
+                                  ← Back to Members List
+                                </button>
+                              </div>
+
+                              <h3 className="text-lg font-bold mb-3">📝 Completed Tasks</h3>
+                              <div className="overflow-x-auto">
+                                <table className="min-w-full text-sm border rounded-lg">
+                                  <thead>
+                                    <tr className="bg-gradient-to-r from-indigo-100 to-purple-100">
+                                      <th className="p-3 text-left font-semibold">Task Title</th>
+                                      <th className="p-3 text-left font-semibold">Start Date</th>
+                                      <th className="p-3 text-left font-semibold">End Date</th>
+                                      <th className="p-3 text-left font-semibold">Priority</th>
+                                      <th className="p-3 text-left font-semibold">Status</th>
+                                      <th className="p-3 text-left font-semibold">Mark (0-100)</th>
+                                      <th className="p-3 text-left font-semibold">Action</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {memberTasks.map((task, idx) => (
+                                      <tr key={task.id} className={`border-b hover:bg-gray-50 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
+                                        <td className="p-3">
+                                          <div className="font-medium text-gray-800">{task.title}</div>
+                                          {task.description && (
+                                            <div className="text-xs text-gray-500 mt-1 max-w-xs truncate">{task.description}</div>
+                                          )}
+                                        </td>
+                                        <td className="p-3 text-gray-600">
+                                          {task.startDate ? new Date(task.startDate).toLocaleDateString() : '-'}
+                                        </td>
+                                        <td className="p-3 text-gray-600">
+                                          {task.endDate ? new Date(task.endDate).toLocaleDateString() : '-'}
+                                        </td>
+                                        <td className="p-3">
+                                          <span className={`text-xs px-2 py-1 rounded-full font-semibold ${
+                                            task.priority === 'high' ? 'bg-red-100 text-red-700' :
+                                            task.priority === 'medium' ? 'bg-yellow-100 text-yellow-700' :
+                                            'bg-green-100 text-green-700'
+                                          }`}>
+                                            {task.priority || 'medium'}
+                                          </span>
+                                        </td>
+                                        <td className="p-3">
+                                          <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full font-semibold">
+                                            completed
+                                          </span>
+                                        </td>
+                                        <td className="p-3">
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            max="100"
+                                            value={(marksDraft[task.id] ?? task.closingMark ?? "")}
+                                            onChange={(e) => setMarksDraft((prev) => ({ ...prev, [task.id]: e.target.value }))}
+                                            className="w-20 px-2 py-1 border border-gray-300 rounded focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400"
+                                            placeholder="0-100"
+                                          />
+                                        </td>
+                                        <td className="p-3">
+                                          <button
+                                            onClick={() => saveTaskMark(task.id, marksDraft[task.id] ?? task.closingMark ?? 0)}
+                                            className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-3 py-1.5 rounded transition-colors duration-200"
+                                            disabled={savingMarkTaskId === task.id}
+                                          >
+                                            {savingMarkTaskId === task.id ? "Saving..." : "Save"}
+                                          </button>
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                                {memberTasks.length === 0 && (
+                                  <p className="p-6 text-center text-gray-500">No completed tasks found for this member</p>
+                                )}
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Manager Panel - Behavior Marking */}
+              {showManagerPanel && (
+                <div className="fixed left-72 right-6 top-6 z-50 animate-slide-down max-h-[90vh] overflow-auto">
+                  <div className="bg-white p-6 rounded-2xl shadow-lg relative">
+                    <div className="absolute right-3 top-3 flex gap-2">
+                      <button onClick={closeManagerPanel} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
+                    </div>
+                    <h2 className="text-xl font-semibold mb-4">👨‍💼 Manager - Behavior Assessment</h2>
+                    
+                    {!selectedMemberForManager ? (
+                      <div>
+                        <div className="mb-4 p-4 bg-green-50 rounded-lg border border-green-200">
+                          <p className="text-sm text-green-800">
+                            <span className="font-semibold">Manager Section:</span> Track and evaluate employee behavior on a daily basis. Each member's score is normalized to 100 based on their average daily marks.
+                          </p>
+                        </div>
+                        
+                        <h3 className="text-lg font-bold mb-3">📊 Members Behavior Score (Out of 100)</h3>
+                        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                          {users.map((member) => {
+                            const userId = member.uid || member.id;
+                            const behaviorScore = calculateBehaviorScore(userId);
+                            const records = getMemberBehaviorRecords(userId);
+                            return (
+                              <div
+                                key={userId}
+                                onClick={() => setSelectedMemberForManager(userId)}
+                                className="border-2 rounded-lg p-4 cursor-pointer hover:bg-green-50 hover:border-green-400 transition-all duration-200 shadow-sm hover:shadow-md"
+                              >
+                                <div className="flex items-center justify-between mb-2">
+                                  <div className="flex-1">
+                                    <p className="font-semibold text-gray-800">{member.name || member.email}</p>
+                                    <p className="text-xs text-gray-500">Total Records: {records.length}</p>
+                                  </div>
+                                  <div className="text-right">
+                                    <div className="text-3xl font-bold text-green-600">{behaviorScore}</div>
+                                    <p className="text-xs text-gray-500">/ 100</p>
+                                  </div>
+                                </div>
+                                <div className="mt-2">
+                                  <div className="w-full bg-gray-200 rounded-full h-2">
+                                    <div 
+                                      className="bg-gradient-to-r from-green-500 to-emerald-600 h-2 rounded-full transition-all duration-500"
+                                      style={{ width: `${behaviorScore}%` }}
+                                    ></div>
+                                  </div>
+                                </div>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setSelectedMemberForManager(userId); }}
+                                  className="mt-3 w-full text-xs text-green-700 hover:text-green-900 font-semibold bg-green-50 hover:bg-green-100 py-2 rounded"
+                                >
+                                  View & Mark Behavior →
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        {(() => {
+                          const member = users.find(u => (u.uid || u.id) === selectedMemberForManager);
+                          const behaviorScore = calculateBehaviorScore(selectedMemberForManager);
+                          const records = getMemberBehaviorRecords(selectedMemberForManager);
+                          
+                          return (
+                            <>
+                              <div className="mb-6 bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-200 rounded-lg p-4">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex-1">
+                                    <h3 className="text-xl font-bold text-gray-800">{member?.name || member?.email || 'Member'}</h3>
+                                    <div className="flex gap-4 mt-2 text-sm">
+                                      <p className="text-gray-600">Total Records: <span className="font-semibold text-gray-800">{records.length}</span></p>
+                                    </div>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="text-sm text-gray-600 mb-1">Behavior Score</p>
+                                    <div className="text-4xl font-bold text-green-600">{behaviorScore}</div>
+                                    <p className="text-sm text-gray-500">/ 100</p>
+                                  </div>
+                                </div>
+                                <div className="mt-3">
+                                  <div className="w-full bg-gray-200 rounded-full h-3">
+                                    <div 
+                                      className="bg-gradient-to-r from-green-500 to-emerald-600 h-3 rounded-full transition-all duration-500"
+                                      style={{ width: `${behaviorScore}%` }}
+                                    ></div>
+                                  </div>
+                                </div>
+                                <button 
+                                  onClick={() => setSelectedMemberForManager('')} 
+                                  className="mt-3 text-sm text-green-700 hover:text-green-900 font-semibold flex items-center gap-1"
+                                >
+                                  ← Back to Members List
+                                </button>
+                              </div>
+
+                              {/* Mark Behavior Form */}
+                              <div className="mb-6 p-4 bg-white border-2 border-green-300 rounded-lg">
+                                <h3 className="text-lg font-bold mb-3">📝 Mark Daily Behavior</h3>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                                  <div>
+                                    <label className="block text-sm font-semibold mb-1 text-gray-700">Select Date</label>
+                                    <input
+                                      type="date"
+                                      value={managerBehaviorDate}
+                                      onChange={(e) => setManagerBehaviorDate(e.target.value)}
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-400 focus:border-green-400"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-sm font-semibold mb-1 text-gray-700">Marks (0-100)</label>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      max="100"
+                                      value={managerBehaviorMarks}
+                                      onChange={(e) => setManagerBehaviorMarks(e.target.value)}
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-400 focus:border-green-400"
+                                      placeholder="Enter marks"
+                                    />
+                                  </div>
+                                </div>
+                                <div className="mb-4">
+                                  <label className="block text-sm font-semibold mb-1 text-gray-700">Status / Remarks (Optional)</label>
+                                  <textarea
+                                    value={managerBehaviorRemarks}
+                                    onChange={(e) => setManagerBehaviorRemarks(e.target.value)}
+                                    rows="3"
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-400 focus:border-green-400"
+                                    placeholder="Add any remarks about behavior, attendance, punctuality, attitude, etc."
+                                  />
+                                </div>
+                                <button
+                                  onClick={saveBehaviorMark}
+                                  disabled={savingBehaviorMark}
+                                  className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2.5 rounded-lg transition-colors duration-200 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                                >
+                                  {savingBehaviorMark ? "Saving..." : "Save Behavior Mark"}
+                                </button>
+                              </div>
+
+                              {/* Behavior History */}
+                              <h3 className="text-lg font-bold mb-3">📜 Behavior History</h3>
+                              <div className="overflow-x-auto">
+                                <table className="min-w-full text-sm border rounded-lg">
+                                  <thead>
+                                    <tr className="bg-gradient-to-r from-green-100 to-emerald-100">
+                                      <th className="p-3 text-left font-semibold">Date</th>
+                                      <th className="p-3 text-left font-semibold">Marks</th>
+                                      <th className="p-3 text-left font-semibold">Remarks</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {records.map((record, idx) => (
+                                      <tr key={idx} className={`border-b hover:bg-gray-50 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
+                                        <td className="p-3 text-gray-800 font-medium">
+                                          {new Date(record.date).toLocaleDateString('en-US', { 
+                                            year: 'numeric', 
+                                            month: 'short', 
+                                            day: 'numeric' 
+                                          })}
+                                        </td>
+                                        <td className="p-3">
+                                          <span className={`inline-block px-3 py-1 rounded-full font-semibold ${
+                                            record.marks >= 80 ? 'bg-green-100 text-green-700' :
+                                            record.marks >= 60 ? 'bg-yellow-100 text-yellow-700' :
+                                            record.marks >= 40 ? 'bg-orange-100 text-orange-700' :
+                                            'bg-red-100 text-red-700'
+                                          }`}>
+                                            {record.marks}/100
+                                          </span>
+                                        </td>
+                                        <td className="p-3 text-gray-600">
+                                          {record.remarks || <span className="text-gray-400 italic">No remarks</span>}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                                {records.length === 0 && (
+                                  <p className="p-6 text-center text-gray-500">No behavior records found for this member</p>
+                                )}
+                              </div>
+                            </>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>

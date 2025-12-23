@@ -515,7 +515,7 @@ export default function AdminDashboard() {
 
     const to = Array.from(emails).join(",");
     const subject = encodeURIComponent(`Task Reminder: ${subjects.slice(0,3).join("; ")}`);
-    const body = encodeURIComponent(`Dear team,\n\nYou have urgent tasks due soon:\n\n${bodies.join("")}\nPlease complete them as soon as possible.\n\nRegards,\nAdmin`);
+    const body = encodeURIComponent(`Dear team,\n\nYou have urgent tasks due soon:\n\n${bodies.join("")}\nPlease complete them as soon as possible.\n\nRegard\nQuality Manager\nShahid Ali`);
     const gmailUrl = `https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(to)}&su=${subject}&body=${body}`;
     window.open(gmailUrl, "_blank");
   };

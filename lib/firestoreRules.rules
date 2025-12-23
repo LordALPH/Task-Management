@@ -57,7 +57,8 @@ service cloud.firestore {
       allow create: if isAuthenticated();
       
       // Update/Delete: Only admins
-      allow update, delete: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
     }
     
     // Assignments Collection Rules
@@ -73,6 +74,51 @@ service cloud.firestore {
         (isAdmin() || request.auth.uid == resource.data.employeeId);
       
       // Delete: Only admins
+      allow delete: if isAdmin();
+    }
+    
+    // Attendance Collection Rules
+    match /attendance/{attendanceId} {
+      // Read: All authenticated users can read
+      allow read: if isAuthenticated();
+      
+      // Create: All authenticated users can create
+      allow create: if isAuthenticated();
+      
+      // Update: Admins can update all attendance records
+      allow update: if isAdmin();
+      
+      // Delete: Only admins can delete
+      allow delete: if isAdmin();
+    }
+    
+    // Status Requests Collection Rules (for approval workflow)
+    match /statusRequests/{requestId} {
+      // Read: All authenticated users can read
+      allow read: if isAuthenticated();
+      
+      // Create: All authenticated users can create
+      allow create: if isAuthenticated();
+      
+      // Update: Only admins can update (approve/reject)
+      allow update: if isAdmin();
+      
+      // Delete: Only admins can delete
+      allow delete: if isAdmin();
+    }
+
+    // Behavior Marks Collection Rules (for manager panel)
+    match /behaviorMarks/{markId} {
+      // Read: All authenticated users can read
+      allow read: if isAuthenticated();
+      
+      // Create: Only admins can create behavior marks
+      allow create: if isAdmin();
+      
+      // Update: Only admins can update behavior marks
+      allow update: if isAdmin();
+      
+      // Delete: Only admins can delete behavior marks
       allow delete: if isAdmin();
     }
   }

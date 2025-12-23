@@ -17,6 +17,12 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState("overview");
+  // Task closing feature state
+  const [showTaskClosing, setShowTaskClosing] = useState(false);
+  const [completedTasks, setCompletedTasks] = useState([]);
+  const [selectedMemberId, setSelectedMemberId] = useState("");
+  const [savingMarkTaskId, setSavingMarkTaskId] = useState("");
+  const [marksDraft, setMarksDraft] = useState({});
   
   // Task form state
   const [showAddTask, setShowAddTask] = useState(false);
@@ -67,12 +73,75 @@ export default function AdminDashboard() {
         completedTasks: completed,
         pendingTasks: pending,
       });
+      // Keep completed tasks list in sync if feature is open
+      if (showTaskClosing) {
+        setCompletedTasks(tasksData.filter((t) => t.status === "completed"));
+      }
     } catch (err) {
       console.error("Dashboard error:", err);
       setError(err.message || "Failed to load dashboard data");
     } finally {
       setLoading(false);
     }
+  };
+
+  const openTaskClosingView = async () => {
+    setShowTaskClosing(true);
+    setActiveTab("overview"); // keep existing tabs untouched
+    try {
+      const completed = await tasksService.getTasksByStatus("completed");
+      setCompletedTasks(completed);
+    } catch (err) {
+      setError(err.message || "Failed to load completed tasks");
+    }
+  };
+
+  const closeTaskClosingView = () => {
+    setShowTaskClosing(false);
+    setSelectedMemberId("");
+    setMarksDraft({});
+  };
+
+  const saveTaskMark = async (taskId, markValue) => {
+    const mark = Number(markValue);
+    if (Number.isNaN(mark) || mark < 0 || mark > 100) {
+      alert("Please enter a valid mark between 0 and 100");
+      return;
+    }
+    try {
+      setSavingMarkTaskId(taskId);
+      await tasksService.updateTask(taskId, {
+        closingMark: mark,
+        closingMarkedBy: user?.uid || "admin",
+      });
+      setCompletedTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, closingMark: mark } : t)));
+      setMarksDraft((prev) => ({ ...prev, [taskId]: mark }));
+    } catch (err) {
+      setError(err.message || "Failed to save mark");
+    } finally {
+      setSavingMarkTaskId("");
+    }
+  };
+
+  const memberNameById = (uid) => {
+    const u = users.find((x) => (x.uid || x.id) === uid);
+    return u ? (u.displayName || u.name || u.email) : "Unknown";
+  };
+
+  const memberSummaries = () => {
+    const grouped = {};
+    completedTasks.forEach((t) => {
+      const uid = t.assignedTo || "unassigned";
+      if (!grouped[uid]) grouped[uid] = { uid, count: 0, marks: [] };
+      grouped[uid].count += 1;
+      if (typeof t.closingMark === "number") grouped[uid].marks.push(t.closingMark);
+    });
+    return Object.values(grouped).map((g) => {
+      const sum = g.marks.reduce((a, b) => a + b, 0);
+      const denom = g.marks.length * 100;
+      const totalScaled = denom > 0 ? Math.round((sum / denom) * 100) : 0; // out of 100
+      return { uid: g.uid, totalOutOf100: totalScaled, tasksCompleted: g.count };
+    });
   };
 
   const handleAddTask = async (e) => {
@@ -186,7 +255,66 @@ export default function AdminDashboard() {
 
   return (
     <div className="min-h-screen bg-gray-100 p-8">
-      <div className="max-w-7xl mx-auto">
+      <div className="max-w-7xl mx-auto flex gap-6">
+        {/* Left Panel */}
+        <div className="w-64 flex-shrink-0">
+          <div className="bg-white rounded-lg shadow p-4 sticky top-8">
+            {/* Member Section */}
+            <div className="mb-6">
+              <h3 className="text-lg font-bold mb-3 text-gray-800">Member</h3>
+              <div className="text-sm text-gray-600">
+                {user?.displayName || user?.email}
+              </div>
+            </div>
+
+            {/* Feature Buttons Section */}
+            <div className="mb-6">
+              <h3 className="text-lg font-bold mb-3 text-gray-800">Features</h3>
+              <div className="space-y-2">
+                <button
+                  onClick={openTaskClosingView}
+                  className="w-full text-left px-4 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium transition border border-indigo-200"
+                >
+                  📋 Task closing
+                </button>
+                <button className="w-full text-left px-4 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium transition border border-indigo-200">
+                  📅 Attendence
+                </button>
+                <button className="w-full text-left px-4 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium transition border border-indigo-200">
+                  ⭐ Quality of work
+                </button>
+                <button className="w-full text-left px-4 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium transition border border-indigo-200">
+                  👔 Manager
+                </button>
+                <button className="w-full text-left px-4 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium transition border border-indigo-200">
+                  📊 KPI
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Actions Section */}
+            <div>
+              <h3 className="text-lg font-bold mb-3 text-gray-800">Quick Actions</h3>
+              <div className="space-y-2">
+                <button 
+                  onClick={() => setActiveTab("tasks")}
+                  className="w-full text-left px-4 py-2 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 font-medium transition text-sm"
+                >
+                  + Add Task
+                </button>
+                <button 
+                  onClick={() => setActiveTab("users")}
+                  className="w-full text-left px-4 py-2 rounded-lg bg-green-50 hover:bg-green-100 text-green-700 font-medium transition text-sm"
+                >
+                  + Add Employee
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Main Content */}
+        <div className="flex-1">
         <h1 className="text-4xl font-bold mb-8">Admin Dashboard</h1>
 
         {error && (
@@ -214,6 +342,104 @@ export default function AdminDashboard() {
             <p className="text-4xl font-bold text-yellow-600 mt-2">{stats.pendingTasks}</p>
           </div>
         </div>
+
+        {showTaskClosing && (
+          <div className="bg-white rounded-lg shadow p-6 mb-8">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold">Task Closing</h2>
+              <button onClick={closeTaskClosingView} className="text-sm text-gray-600 hover:text-gray-900">Close ✕</button>
+            </div>
+            <div className="grid gap-4 md:grid-cols-3 mb-6">
+              <div className="md:col-span-2">
+                <label className="block text-sm font-semibold mb-1">Filter by member</label>
+                <select
+                  value={selectedMemberId}
+                  onChange={(e) => setSelectedMemberId(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                >
+                  <option value="">All members</option>
+                  {users.map((u) => (
+                    <option key={u.uid || u.id} value={u.uid || u.id}>
+                      {u.displayName || u.name || u.email}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3">
+                <p className="text-sm text-indigo-700">Each task is marked out of 100. Member total is the sum of their task marks, normalized back to 100.</p>
+              </div>
+            </div>
+
+            {!selectedMemberId && (
+              <div className="mb-6">
+                <h3 className="text-lg font-bold mb-2">Members — Total (out of 100)</h3>
+                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {memberSummaries().map((m) => (
+                    <div key={m.uid} className="border rounded-lg p-4">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="font-semibold">{memberNameById(m.uid)}</p>
+                          <p className="text-xs text-gray-500">Completed: {m.tasksCompleted}</p>
+                        </div>
+                        <div className="text-2xl font-bold text-indigo-600">{m.totalOutOf100}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-100 border-b">
+                  <tr>
+                    <th className="px-6 py-3 text-left font-semibold">Title</th>
+                    <th className="px-6 py-3 text-left font-semibold">Assigned</th>
+                    <th className="px-6 py-3 text-left font-semibold">Status</th>
+                    <th className="px-6 py-3 text-left font-semibold">Mark (0-100)</th>
+                    <th className="px-6 py-3 text-left font-semibold">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {completedTasks
+                    .filter((t) => !selectedMemberId || (t.assignedTo === selectedMemberId))
+                    .map((task) => (
+                      <tr key={task.id} className="border-b hover:bg-gray-50">
+                        <td className="px-6 py-3">{task.title}</td>
+                        <td className="px-6 py-3 text-sm">{task.assignedToName || memberNameById(task.assignedTo)}</td>
+                        <td className="px-6 py-3">
+                          <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">completed</span>
+                        </td>
+                        <td className="px-6 py-3">
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            value={(marksDraft[task.id] ?? task.closingMark ?? "")}
+                            onChange={(e) => setMarksDraft((prev) => ({ ...prev, [task.id]: e.target.value }))}
+                            className="w-24 px-2 py-1 border border-gray-300 rounded"
+                            placeholder="0-100"
+                          />
+                        </td>
+                        <td className="px-6 py-3">
+                          <button
+                            onClick={() => saveTaskMark(task.id, marksDraft[task.id] ?? task.closingMark ?? 0)}
+                            className="text-indigo-600 hover:text-indigo-800 font-semibold text-xs"
+                            disabled={savingMarkTaskId === task.id}
+                          >
+                            {savingMarkTaskId === task.id ? "Saving..." : "Save"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+              {completedTasks.filter((t) => !selectedMemberId || (t.assignedTo === selectedMemberId)).length === 0 && (
+                <p className="p-6 text-center text-gray-500">No completed tasks for this selection</p>
+              )}
+            </div>
+          </div>
+        )}
 
         <div className="border-b border-gray-300 mb-6 flex space-x-1">
           {["overview", "tasks", "users", "activity"].map((tab) => (
@@ -494,6 +720,7 @@ export default function AdminDashboard() {
             )}
           </div>
         )}
+        </div>
       </div>
     </div>
   );
