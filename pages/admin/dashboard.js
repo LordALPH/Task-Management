@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { tasksService, usersService, activityLogsService } from "../../lib/firebaseService";
+import { useState, useEffect, useRef } from "react";
+import { tasksService, usersService, activityLogsService, kpiService } from "../../lib/firebaseService";
 import { useAuthContext } from "../../context/AuthContext";
 
 export default function AdminDashboard() {
@@ -23,6 +23,15 @@ export default function AdminDashboard() {
   const [selectedMemberId, setSelectedMemberId] = useState("");
   const [savingMarkTaskId, setSavingMarkTaskId] = useState("");
   const [marksDraft, setMarksDraft] = useState({});
+  
+  // KPI feature state
+  const [showKPI, setShowKPI] = useState(false);
+  const [kpiData, setKpiData] = useState({});
+  const [selectedKPIMonth, setSelectedKPIMonth] = useState("");
+  const [selectedKPIYear, setSelectedKPIYear] = useState("2024");
+  const [kpiScores, setKpiScores] = useState({});
+  const [savingKPI, setSavingKPI] = useState(false);
+  const kpiSectionRef = useRef(null);
   
   // Task form state
   const [showAddTask, setShowAddTask] = useState(false);
@@ -48,6 +57,17 @@ export default function AdminDashboard() {
   useEffect(() => {
     fetchDashboardData();
   }, []);
+
+  useEffect(() => {
+    if (showKPI) {
+      loadKPIData();
+      setTimeout(() => {
+        if (kpiSectionRef.current) {
+          kpiSectionRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }, 150);
+    }
+  }, [showKPI]);
 
   const fetchDashboardData = async () => {
     try {
@@ -87,6 +107,7 @@ export default function AdminDashboard() {
 
   const openTaskClosingView = async () => {
     setShowTaskClosing(true);
+    setShowKPI(false);
     setActiveTab("overview"); // keep existing tabs untouched
     try {
       const completed = await tasksService.getTasksByStatus("completed");
@@ -101,6 +122,113 @@ export default function AdminDashboard() {
     setSelectedMemberId("");
     setMarksDraft({});
   };
+
+  // KPI Functions
+  const openKPIView = () => {
+    setShowTaskClosing(false);
+    setShowKPI(true);
+    setActiveTab("overview");
+  };
+
+  const closeKPIView = () => {
+    setShowKPI(false);
+    setSelectedKPIMonth("");
+    setKpiScores({});
+  };
+
+  const loadKPIData = async () => {
+    try {
+      setError(null);
+      const data = await kpiService.getAllScores();
+      setKpiData(data);
+    } catch (err) {
+      console.error("Error loading KPI data:", err);
+      setError(err.message || "Failed to load KPI data");
+    }
+  };
+
+  const saveKPIScores = async () => {
+    if (!selectedKPIMonth || !selectedKPIYear) {
+      alert("Please select month and year");
+      return;
+    }
+
+    setSavingKPI(true);
+    try {
+      const results = {
+        saved: [],
+        skipped: [],
+      };
+
+      for (const [userId, score] of Object.entries(kpiScores)) {
+        if (score === undefined || score === null || score === "") continue;
+
+        const scoreNum = Number(score);
+        const memberName = memberNameById(userId);
+
+        if (Number.isNaN(scoreNum) || scoreNum < 0 || scoreNum > 100) {
+          results.skipped.push(`${memberName}: invalid score`);
+          continue;
+        }
+
+        try {
+          await kpiService.createMonthlyScore({
+            userId,
+            userName: memberName,
+            month: selectedKPIMonth,
+            year: selectedKPIYear,
+            score: scoreNum,
+            addedBy: user?.uid || "admin",
+          });
+          results.saved.push(memberName);
+        } catch (innerErr) {
+          results.skipped.push(innerErr.message || `${memberName}: already recorded`);
+        }
+      }
+
+      if (results.saved.length) {
+        alert(`Saved KPI score(s) for: ${results.saved.join(", ")}`);
+      }
+
+      if (results.skipped.length) {
+        alert(`Skipped entries: ${results.skipped.join(" | ")}`);
+      }
+
+      await loadKPIData();
+      setKpiScores({});
+    } catch (err) {
+      console.error("Error saving KPI:", err);
+      alert("Failed to save KPI scores: " + err.message);
+    } finally {
+      setSavingKPI(false);
+    }
+  };
+
+  const getUserKPITotal = (userId) => {
+    let total = 0;
+    let count = 0;
+    
+    Object.entries(kpiData).forEach(([key, data]) => {
+      if (data.userId === userId) {
+        total += data.score || 0;
+        count += 1;
+      }
+    });
+    
+    if (count === 0) return 0;
+    return Math.round((total / count));
+  };
+
+  const getMonthsList = () => {
+    return [
+      "November", "December", "January", "February", "March", 
+      "April", "May", "June", "July", "August", "September", "October"
+    ];
+  };
+
+  const employeeMembers = users.filter((member) => (
+    (member.role || "employee").toLowerCase() === "employee"
+  ));
 
   const saveTaskMark = async (taskId, markValue) => {
     const mark = Number(markValue);
@@ -286,7 +414,10 @@ export default function AdminDashboard() {
                 <button className="w-full text-left px-4 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium transition border border-indigo-200">
                   👔 Manager
                 </button>
-                <button className="w-full text-left px-4 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium transition border border-indigo-200">
+                <button 
+                  onClick={openKPIView}
+                  className="w-full text-left px-4 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium transition border border-indigo-200"
+                >
                   📊 KPI
                 </button>
               </div>
@@ -436,6 +567,149 @@ export default function AdminDashboard() {
               </table>
               {completedTasks.filter((t) => !selectedMemberId || (t.assignedTo === selectedMemberId)).length === 0 && (
                 <p className="p-6 text-center text-gray-500">No completed tasks for this selection</p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {showKPI && (
+          <div ref={kpiSectionRef} className="bg-white rounded-lg shadow p-6 mb-8">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold">📊 KPI Management</h2>
+              <button onClick={closeKPIView} className="text-sm text-gray-600 hover:text-gray-900">Close ✕</button>
+            </div>
+            
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+              <p className="text-sm text-blue-700">
+                <strong>Note:</strong> Add KPI scores for each employee on a monthly basis. Each score is out of 100. 
+                If an employee has multiple months of scores, the average will be displayed (normalized to 100).
+                Scores can only be added once per month per employee.
+              </p>
+            </div>
+
+            {/* Member List with Total KPI Scores */}
+            <div className="mb-6">
+              <h3 className="text-lg font-bold mb-3">Employee KPI Scores (Average out of 100)</h3>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {employeeMembers.length === 0 ? (
+                  <div className="col-span-full text-sm text-gray-500">
+                    No employees found yet. Add team members to start tracking KPI scores.
+                  </div>
+                ) : (
+                  employeeMembers.map((member) => {
+                    const total = getUserKPITotal(member.uid || member.id);
+                    const monthsCount = Object.values(kpiData).filter((d) => d.userId === (member.uid || member.id)).length;
+                    return (
+                      <div key={member.uid || member.id} className="border rounded-lg p-4 bg-gray-50">
+                        <div className="flex items-center justify-between mb-2">
+                          <div>
+                            <p className="font-semibold text-gray-800">{member.displayName || member.name || member.email}</p>
+                            <p className="text-xs text-gray-500">Months Recorded: {monthsCount}</p>
+                          </div>
+                          <div className="text-2xl font-bold text-blue-600">{total}</div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            {/* Add Monthly Scores */}
+            <div className="border-t pt-6">
+              <h3 className="text-lg font-bold mb-4">Add Monthly KPI Scores</h3>
+              
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div>
+                  <label className="block text-sm font-semibold mb-2">Select Month</label>
+                  <select
+                    value={selectedKPIMonth}
+                    onChange={(e) => setSelectedKPIMonth(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  >
+                    <option value="">-- Select Month --</option>
+                    {getMonthsList().map((month) => (
+                      <option key={month} value={month}>
+                        {month}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold mb-2">Select Year</label>
+                  <select
+                    value={selectedKPIYear}
+                    onChange={(e) => setSelectedKPIYear(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                  >
+                    <option value="2024">2024</option>
+                    <option value="2025">2025</option>
+                    <option value="2026">2026</option>
+                  </select>
+                </div>
+              </div>
+
+              {selectedKPIMonth && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm border">
+                    <thead className="bg-gray-100 border-b">
+                      <tr>
+                        <th className="px-6 py-3 text-left font-semibold">Employee Name</th>
+                        <th className="px-6 py-3 text-left font-semibold">Department</th>
+                        <th className="px-6 py-3 text-left font-semibold">Score (0-100)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {employeeMembers.length === 0 ? (
+                        <tr>
+                          <td colSpan={3} className="px-6 py-4 text-center text-sm text-gray-500">
+                            No employees available. Add employees first to record KPI scores.
+                          </td>
+                        </tr>
+                      ) : (
+                        employeeMembers.map((member) => {
+                          const userId = member.uid || member.id;
+                          const existingScoreKey = `${userId}_${selectedKPIYear}_${selectedKPIMonth}`;
+                          const hasExistingScore = kpiData[existingScoreKey];
+                          
+                          return (
+                            <tr key={userId} className="border-b hover:bg-gray-50">
+                              <td className="px-6 py-3 font-semibold">{member.displayName || member.name || member.email}</td>
+                              <td className="px-6 py-3 text-gray-600">{member.department || "-"}</td>
+                              <td className="px-6 py-3">
+                                {hasExistingScore ? (
+                                  <span className="text-green-600 font-semibold">
+                                    Already added: {hasExistingScore.score}
+                                  </span>
+                                ) : (
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    max="100"
+                                    value={kpiScores[userId] || ""}
+                                    onChange={(e) => setKpiScores((prev) => ({ ...prev, [userId]: e.target.value }))}
+                                    className="w-24 px-3 py-2 border border-gray-300 rounded-lg"
+                                    placeholder="0-100"
+                                  />
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                  
+                  <div className="mt-6 flex justify-end">
+                    <button
+                      onClick={saveKPIScores}
+                      disabled={savingKPI || Object.keys(kpiScores).length === 0}
+                      className="bg-blue-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                    >
+                      {savingKPI ? "Saving..." : "Save KPI Scores"}
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
           </div>
