@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db } from "../lib/FirebaseClient";
 import {
@@ -25,6 +25,11 @@ import * as XLSX from "xlsx";
 
 export default function AdminDashboard() {
   const router = useRouter();
+  const getTodayISO = () => {
+    const now = new Date();
+    const tzOffsetMs = now.getTimezoneOffset() * 60000;
+    return new Date(now.getTime() - tzOffsetMs).toISOString().split("T")[0];
+  };
   const [tasks, setTasks] = useState([]);
   const [title, setTitle] = useState("");
   const [assignedEmail, setAssignedEmail] = useState("");
@@ -90,6 +95,38 @@ export default function AdminDashboard() {
   const [welcomeVisible, setWelcomeVisible] = useState(false);
   // client-only current user email to avoid hydration mismatch
   const [currentEmail, setCurrentEmail] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+
+  const ensureAdminProfile = useCallback(async () => {
+    const current = auth.currentUser;
+    if (!current) return null;
+    try {
+      const adminRef = doc(db, "users", current.uid);
+      const adminSnap = await getDoc(adminRef);
+      const basePayload = {
+        uid: current.uid,
+        email: current.email || "",
+        name: current.displayName || current.email || "Admin",
+        role: "admin",
+      };
+
+      if (!adminSnap.exists()) {
+        await setDoc(adminRef, { ...basePayload, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+        return basePayload;
+      }
+
+      const data = adminSnap.data() || {};
+      if (data.role !== "admin" || data.email !== basePayload.email || !data.name) {
+        await setDoc(adminRef, { ...data, ...basePayload, updatedAt: serverTimestamp() }, { merge: true });
+        return { ...data, ...basePayload };
+      }
+
+      return data;
+    } catch (err) {
+      console.error("Failed to ensure admin profile:", err);
+      return null;
+    }
+  }, []);
   // approvals list
   const [showApprovalsPanel, setShowApprovalsPanel] = useState(false);
   const [approvals, setApprovals] = useState([]);
@@ -101,6 +138,8 @@ export default function AdminDashboard() {
   // Quality of Work panel state
   const [showQualityPanel, setShowQualityPanel] = useState(false);
   const [selectedMemberForQuality, setSelectedMemberForQuality] = useState("");
+  const [qualityMarksDraft, setQualityMarksDraft] = useState({});
+  const [savingQualityMarkTaskId, setSavingQualityMarkTaskId] = useState("");
   // Manager panel state
   const [showManagerPanel, setShowManagerPanel] = useState(false);
   const [selectedMemberForManager, setSelectedMemberForManager] = useState("");
@@ -109,13 +148,14 @@ export default function AdminDashboard() {
   const [managerBehaviorRemarks, setManagerBehaviorRemarks] = useState("");
   const [savingBehaviorMark, setSavingBehaviorMark] = useState(false);
   const [behaviorData, setBehaviorData] = useState({}); // { userId_date: { marks, remarks, timestamp } }
+  const [kpiData, setKpiData] = useState({}); // KPI documents keyed by id
   // Attendance feature state
   const [showAttendancePanel, setShowAttendancePanel] = useState(false);
-  const [selectedMemberForAttendance, setSelectedMemberForAttendance] = useState("");
   const [attendanceData, setAttendanceData] = useState({}); // { userId_date: "present"|"absent"|"off" }
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
-  const [savingAttendance, setSavingAttendance] = useState(false);
+  const [selectedAttendanceDate, setSelectedAttendanceDate] = useState(() => getTodayISO());
+  const [savingAttendanceKey, setSavingAttendanceKey] = useState("");
   // Bulk attendance state
   const [bulkAttendanceDate, setBulkAttendanceDate] = useState("");
   const [bulkAttendanceAction, setBulkAttendanceAction] = useState("present");
@@ -155,71 +195,91 @@ export default function AdminDashboard() {
     try {
       const unsub = onAuthStateChanged(auth, (u) => {
         setCurrentEmail(u ? u.email : null);
+        setAuthReady(true);
+        if (!u) {
+          router.push("/login");
+        }
       });
       return () => unsub && unsub();
     } catch (e) {
       // ignore in non-browser environments
+      setAuthReady(true);
     }
-  }, []);
+  }, [router]);
 
   // 🔹 Fetch all users + tasks (initial)
   useEffect(() => {
-    const fetchData = async () => {
-      const usersSnap = await getDocs(collection(db, "users"));
-      const tasksSnap = await getDocs(collection(db, "tasks"));
+    if (!authReady) return;
+    const run = async () => {
+      const current = auth.currentUser;
+      if (!current) return;
+      await ensureAdminProfile();
+      const [usersSnap, tasksSnap] = await Promise.all([
+        getDocs(collection(db, "users")),
+        getDocs(collection(db, "tasks")),
+      ]);
       const usersData = usersSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
       const tasksData = tasksSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
       setUsers(usersData);
       setTasks(tasksData);
-      // initialise actualStatusMap from tasks
       const map = {};
       tasksData.forEach((t) => (map[t.id] = t.actualStatus || ""));
       setActualStatusMap(map);
       setLoading(false);
     };
-    fetchData();
-  }, []);
+    run();
+  }, [authReady, ensureAdminProfile]);
 
   // Real-time listeners (users, tasks, approvals)
   useEffect(() => {
-    const usersRef = collection(db, "users");
-    const unsubscribeUsers = onSnapshot(usersRef, (snapshot) => {
-      setUsers(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
-    });
+    if (!authReady) return;
+    const current = auth.currentUser;
+    if (!current) return;
+    let unsubscribeUsers = () => {};
+    let unsubscribeTasks = () => {};
+    let unsubscribeApprovals = () => {};
 
-    const tasksRef = collection(db, "tasks");
-    const unsubscribeTasks = onSnapshot(tasksRef, (snapshot) => {
-      const t = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-      setTasks(t);
-      // keep actualStatusMap in sync with latest tasks
-      setActualStatusMap((prev) => {
-        const next = { ...prev };
-        t.forEach((task) => {
-          if (typeof task.actualStatus !== "undefined") next[task.id] = task.actualStatus;
-          else if (!(task.id in next)) next[task.id] = "";
-        });
-        // remove keys for deleted tasks
-        Object.keys(next).forEach((k) => {
-          if (!t.find((x) => x.id === k)) delete next[k];
-        });
-        return next;
+    const setup = async () => {
+      await ensureAdminProfile();
+
+      const usersRef = collection(db, "users");
+      unsubscribeUsers = onSnapshot(usersRef, (snapshot) => {
+        setUsers(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
       });
-    });
 
-    // Listen for pending approval requests (statusRequests collection)
-    const approvalsRef = collection(db, 'statusRequests');
-    const unsubscribeApprovals = onSnapshot(query(approvalsRef, where('status', '==', 'pending')), (snap) => {
-      setApprovals(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
+      const tasksRef = collection(db, "tasks");
+      unsubscribeTasks = onSnapshot(tasksRef, (snapshot) => {
+        const t = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+        setTasks(t);
+        setActualStatusMap((prev) => {
+          const next = { ...prev };
+          t.forEach((task) => {
+            if (typeof task.actualStatus !== "undefined") next[task.id] = task.actualStatus;
+            else if (!(task.id in next)) next[task.id] = "";
+          });
+          Object.keys(next).forEach((k) => {
+            if (!t.find((x) => x.id === k)) delete next[k];
+          });
+          return next;
+        });
+      });
 
-    setLoading(false);
+      const approvalsRef = collection(db, 'statusRequests');
+      unsubscribeApprovals = onSnapshot(query(approvalsRef, where('status', '==', 'pending')), (snap) => {
+        setApprovals(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      });
+
+      setLoading(false);
+    };
+
+    setup();
 
     return () => {
       unsubscribeUsers();
       unsubscribeTasks();
       unsubscribeApprovals();
     };
-  }, []);
+  }, [authReady, ensureAdminProfile]);
 
   // 🔹 Add new employee
   const addEmployee = async (e) => {
@@ -313,6 +373,24 @@ export default function AdminDashboard() {
     });
   }, [completedTasks, users]);
 
+  const qualitySummaries = useMemo(() => {
+    const grouped = {};
+    completedTasks.forEach((t) => {
+      const key = t.assignedTo || t.assignedEmail || "unassigned";
+      if (!grouped[key]) grouped[key] = { key, marks: [], count: 0 };
+      grouped[key].count += 1;
+      if (typeof t.qualityMark === "number") grouped[key].marks.push(t.qualityMark);
+    });
+    return Object.values(grouped).map((g) => {
+      const sum = g.marks.reduce((a, b) => a + b, 0);
+      const denom = g.marks.length * 100;
+      const totalScaled = denom > 0 ? Math.round((sum / denom) * 100) : 0;
+      const labelUser = users.find((x) => x.uid === g.key || x.id === g.key || x.email === g.key);
+      const name = labelUser ? (labelUser.name || labelUser.email) : g.key;
+      return { idOrEmail: g.key, name, totalOutOf100: totalScaled, tasksCompleted: g.count, markedCount: g.marks.length };
+    });
+  }, [completedTasks, users]);
+
   // Selected member detailed summary (scaled and raw obtained/total)
   const selectedMemberSummary = useMemo(() => {
     if (!selectedMemberForClosing) return null;
@@ -344,18 +422,15 @@ export default function AdminDashboard() {
   const closeQualityPanel = () => {
     setShowQualityPanel(false);
     setSelectedMemberForQuality("");
+    setQualityMarksDraft({});
+    setSavingQualityMarkTaskId("");
   };
 
   const openManagerPanel = async () => {
     setShowManagerPanel(true);
     // Load behavior data from Firestore
     try {
-      const behaviorSnap = await getDocs(collection(db, "behaviorMarks"));
-      const data = {};
-      behaviorSnap.forEach((doc) => {
-        data[doc.id] = doc.data();
-      });
-      setBehaviorData(data);
+      await loadBehaviorData();
     } catch (err) {
       console.error("Failed to load behavior marks:", err);
     }
@@ -409,14 +484,14 @@ export default function AdminDashboard() {
     }
   };
 
-  const calculateBehaviorScore = (userId) => {
+  const calculateBehaviorScore = useCallback((userId) => {
     const userMarks = Object.entries(behaviorData)
       .filter(([key]) => key.startsWith(`${userId}_`))
       .map(([_, data]) => data.marks);
     if (userMarks.length === 0) return 0;
     const sum = userMarks.reduce((a, b) => a + b, 0);
     return Math.round(sum / userMarks.length);
-  };
+  }, [behaviorData]);
 
   const getMemberBehaviorRecords = (userId) => {
     return Object.entries(behaviorData)
@@ -446,8 +521,25 @@ export default function AdminDashboard() {
     }
   };
 
+  const saveQualityMark = async (taskId, value) => {
+    const markNum = Number(value);
+    if (Number.isNaN(markNum) || markNum < 0 || markNum > 100) {
+      alert("Please enter a valid mark between 0 and 100");
+      return;
+    }
+    try {
+      setSavingQualityMarkTaskId(taskId);
+      await updateDoc(doc(db, "tasks", taskId), { qualityMark: markNum, qualityMarkedAt: serverTimestamp() });
+      setQualityMarksDraft((prev) => ({ ...prev, [taskId]: markNum }));
+    } catch (err) {
+      alert("Failed to save quality mark: " + (err?.message || err));
+    } finally {
+      setSavingQualityMarkTaskId("");
+    }
+  };
+
   // Attendance helpers
-  const getHolidays = (month, year) => {
+  const getHolidays = useCallback((month, year) => {
     const holidays = [];
     // Christmas
     if (month === 11) holidays.push({ date: 25, name: "Christmas" });
@@ -459,9 +551,9 @@ export default function AdminDashboard() {
     if (year === 2026 && month === 2) holidays.push({ date: 20, name: "Eid al-Fitr" });
     if (year === 2026 && month === 4) holidays.push({ date: 27, name: "Eid al-Adha" });
     return holidays;
-  };
+  }, []);
 
-  const generateCalendarDays = (month, year) => {
+  const generateCalendarDays = useCallback((month, year) => {
     const firstDay = new Date(year, month, 1);
     const lastDay = new Date(year, month + 1, 0);
     const days = [];
@@ -479,18 +571,66 @@ export default function AdminDashboard() {
       });
     }
     return days;
-  };
+  }, [getHolidays]);
 
-  const openAttendancePanel = async () => {
-    setShowAttendancePanel(true);
-    // Fetch attendance from Firestore
+  const loadAttendanceData = useCallback(async () => {
     try {
       const attendanceSnap = await getDocs(collection(db, "attendance"));
       const data = {};
-      attendanceSnap.forEach((doc) => {
-        data[doc.id] = doc.data().status;
+      attendanceSnap.forEach((docSnap) => {
+        data[docSnap.id] = docSnap.data().status;
       });
-      setAttendanceData(data);
+      if (Object.keys(data).length) {
+        setAttendanceData((prev) => ({ ...prev, ...data }));
+      }
+    } catch (err) {
+      console.error("Failed to load attendance:", err);
+    }
+  }, []);
+
+  const loadBehaviorData = useCallback(async () => {
+    try {
+      const behaviorSnap = await getDocs(collection(db, "behaviorMarks"));
+      const data = {};
+      behaviorSnap.forEach((docSnap) => {
+        data[docSnap.id] = docSnap.data();
+      });
+      setBehaviorData(data);
+    } catch (err) {
+      console.error("Failed to load behavior marks:", err);
+    }
+  }, []);
+
+  const loadKpiData = useCallback(async () => {
+    try {
+      const kpiSnap = await getDocs(collection(db, "kpi"));
+      const data = {};
+      kpiSnap.forEach((docSnap) => {
+        data[docSnap.id] = { id: docSnap.id, ...docSnap.data() };
+      });
+      setKpiData(data);
+    } catch (err) {
+      console.error("Failed to load KPI data:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!authReady) return;
+    const user = auth.currentUser;
+    if (!user) return;
+    ensureAdminProfile().then(() => {
+      loadAttendanceData();
+      loadBehaviorData();
+      loadKpiData();
+    });
+  }, [authReady, ensureAdminProfile, loadAttendanceData, loadBehaviorData, loadKpiData]);
+
+  const openAttendancePanel = async () => {
+    setShowAttendancePanel(true);
+    setSelectedAttendanceDate(getTodayISO());
+    // Fetch attendance from Firestore
+    try {
+      await loadAttendanceData();
     } catch (err) {
       console.error("Failed to load attendance:", err);
     }
@@ -498,13 +638,17 @@ export default function AdminDashboard() {
 
   const closeAttendancePanel = () => {
     setShowAttendancePanel(false);
-    setSelectedMemberForAttendance("");
+    setSavingAttendanceKey("");
   };
 
   const markAttendance = async (userId, dateStr, status) => {
     const key = `${userId}_${dateStr}`;
     try {
-      setSavingAttendance(true);
+      if (!dateStr) {
+        alert("Select a date first");
+        return;
+      }
+      setSavingAttendanceKey(key);
       await setDoc(doc(db, "attendance", key), {
         userId,
         date: dateStr,
@@ -515,7 +659,7 @@ export default function AdminDashboard() {
     } catch (err) {
       alert("Failed to mark attendance: " + (err?.message || err));
     } finally {
-      setSavingAttendance(false);
+      setSavingAttendanceKey("");
     }
   };
 
@@ -571,12 +715,12 @@ export default function AdminDashboard() {
     }
   };
 
-  const calculateAttendancePercentage = (userId) => {
+  const calculateAttendancePercentage = useCallback((userId) => {
     const days = generateCalendarDays(currentMonth, currentYear);
-    const workingDays = days.filter(d => !d.isSunday && !d.holiday);
+    const workingDays = days.filter((d) => !d.isSunday && !d.holiday);
     let considered = 0;
     let present = 0;
-    workingDays.forEach(day => {
+    workingDays.forEach((day) => {
       const key = `${userId}_${day.fullDate}`;
       const status = attendanceData[key];
       if (status === "present") {
@@ -585,18 +729,17 @@ export default function AdminDashboard() {
       } else if (status === "absent") {
         considered++;
       }
-      // "off" is excluded from calculation
     });
     return considered > 0 ? Math.round((present / considered) * 100) : 0;
-  };
+  }, [attendanceData, currentMonth, currentYear, generateCalendarDays]);
 
   const attendanceSummaries = useMemo(() => {
-    return users.map(u => {
+    return users.map((u) => {
       const uid = u.uid || u.id;
       const percentage = calculateAttendancePercentage(uid);
       return { uid, name: u.name || u.email, percentage };
     });
-  }, [users, attendanceData, currentMonth, currentYear]);
+  }, [users, calculateAttendancePercentage]);
 
   // 🔹 Add Task (assign by dropdown or email + start & end dates + priority)
   const addTask = async (e) => {
@@ -878,78 +1021,106 @@ export default function AdminDashboard() {
     router.push("/login");
   };
 
-  // 🔹 Evaluation: compute completion rate, grade, remarks for each user
+  const calcAverage = (values) => {
+    if (!values || values.length === 0) return 0;
+    const total = values.reduce((sum, value) => sum + value, 0);
+    return total / values.length;
+  };
+
+  const toOneDecimal = (value) => {
+    if (!Number.isFinite(value)) return 0;
+    return Number(value.toFixed(1));
+  };
+
+  const gradeFromTotal = (score) => {
+    if (score >= 90) return { grade: "A", remarks: "Outstanding performance" };
+    if (score >= 80) return { grade: "B", remarks: "Strong and consistent" };
+    if (score >= 70) return { grade: "C", remarks: "Solid progress" };
+    if (score >= 60) return { grade: "D", remarks: "Needs coaching" };
+    return { grade: "F", remarks: "Immediate improvement required" };
+  };
+
+  const gradeColorClass = (grade) => {
+    if (grade === "A") return "text-green-600";
+    if (grade === "B") return "text-blue-600";
+    if (grade === "C") return "text-yellow-600";
+    if (grade === "D") return "text-orange-600";
+    return "text-red-600";
+  };
+
+  const formatOneDecimalString = (value) => toOneDecimal(value).toFixed(1);
+
+  // 🔹 Evaluation: aggregate weighted scores across modules
   const evaluation = useMemo(() => {
-    if (!users || users.length === 0) return [];
+    const employees = (users || []).filter((u) => (u.role || "employee").toLowerCase() === "employee");
+    if (employees.length === 0) return [];
 
-    return users.map((u) => {
-      // Build evaluation considering rules:
-      // - 'cancelled' tasks do not affect evaluation (skip)
-      // - 'in process' tasks that are not overdue count as full marks (treated as completed)
-      // - 'in process' tasks that are overdue are treated as 'delayed' and deduct marks
-      // - 'delayed' tasks deduct marks
-      const now = new Date();
+    const kpiEntries = Object.values(kpiData || {});
 
-      const relevant = tasks
-        .filter((t) => {
-          const belongs = (t.assignedTo && t.assignedTo === u.uid) || (t.assignedEmail && t.assignedEmail === u.email);
-          return belongs;
-        })
-        .map((t) => {
-          const st = canonicalStatus(t.status);
-          // skip cancelled tasks from evaluation
-          if (st === "cancelled") return null;
+    return employees
+      .map((u) => {
+        const userId = u.uid || u.id || u.email;
+        const emailLower = (u.email || "").toLowerCase();
 
-          const end = toDateObj(t.endDate);
-          // if in process and not overdue -> treat as completed for evaluation
-          if (st === "in process") {
-            if (!end) {
-              // no end date -> assume not overdue => full marks
-              return { ...t, evalStatus: "completed" };
-            }
-            if (end >= now) {
-              return { ...t, evalStatus: "completed" };
-            }
-            // end < now => overdue -> treat as delayed
-            return { ...t, evalStatus: "delayed", autoConverted: true };
-          }
+        const userTasks = (tasks || []).filter((task) => {
+          const assignedId = task.assignedTo || task.assignedToId || "";
+          const assignedEmail = (task.assignedEmail || "").toLowerCase();
+          const matchesId = assignedId && (
+            assignedId === userId || assignedId === u.uid || assignedId === u.id
+          );
+          const matchesEmail = assignedEmail && emailLower && assignedEmail === emailLower;
+          return matchesId || matchesEmail;
+        });
 
-          // for completed or delayed, use their status (delayed deducts marks)
-          if (st === "completed") return { ...t, evalStatus: "completed" };
-          if (st === "delayed") return { ...t, evalStatus: "delayed" };
+        const closingMarks = userTasks
+          .map((task) => (typeof task.closingMark === "number" ? task.closingMark : null))
+          .filter((mark) => typeof mark === "number");
+        const closingAverage = calcAverage(closingMarks);
+        const taskClosingWeighted = toOneDecimal((closingAverage / 100) * 40);
 
-          // fallback: treat other statuses (e.g., pending) as in process semantics
-          const endFallback = toDateObj(t.endDate);
-          if (!endFallback || endFallback >= now) return { ...t, evalStatus: "completed" };
-          return { ...t, evalStatus: "delayed" };
-        })
-        .filter(Boolean);
+          const qualityMarks = userTasks
+            .map((task) => (typeof task.qualityMark === "number" ? task.qualityMark : null))
+            .filter((mark) => typeof mark === "number");
+        const qualityAverage = calcAverage(qualityMarks);
+        const qualityWeighted = toOneDecimal((qualityAverage / 100) * 20);
 
-      const total = relevant.length;
-      const completed = relevant.filter((t) => (t.evalStatus || canonicalStatus(t.status)) === "completed").length;
-      const rate = total === 0 ? 0 : Math.round((completed / total) * 100);
+        const attendancePercentage = calculateAttendancePercentage(userId);
+        const attendanceWeighted = toOneDecimal((attendancePercentage / 100) * 10);
 
-      let grade;
-      if (rate > 90) grade = "A";
-      else if (rate >= 85 && rate <= 90) grade = "B";
-      else if (rate >= 80 && rate <= 84) grade = "C";
-      else if (rate >= 70 && rate <= 79) grade = "D";
-      else grade = "F";
+        const managerRaw = calculateBehaviorScore(userId);
+        const managerWeighted = toOneDecimal((managerRaw / 100) * 20);
 
-      const remarks = grade === "F" ? "need improvment" : "";
+        const userKpis = kpiEntries.filter((entry) => {
+          if (!entry || typeof entry !== "object") return false;
+          if (entry.userId && userId && entry.userId === userId) return true;
+          if (entry.userId && u.uid && entry.userId === u.uid) return true;
+          if (entry.userEmail && emailLower && entry.userEmail.toLowerCase() === emailLower) return true;
+          return false;
+        });
+        const kpiAverage = calcAverage(userKpis.map((entry) => Number(entry.score) || 0));
+        const kpiWeighted = toOneDecimal((kpiAverage / 100) * 10);
 
-      return {
-        id: u.id,
-        name: u.name || "-",
-        email: u.email,
-        total,
-        completed,
-        rate,
-        grade,
-        remarks,
-      };
-    });
-  }, [users, tasks]);
+        const total = toOneDecimal(
+          taskClosingWeighted + attendanceWeighted + qualityWeighted + managerWeighted + kpiWeighted
+        );
+        const { grade, remarks } = gradeFromTotal(total);
+
+        return {
+          id: userId,
+          name: u.name || u.displayName || u.email || "Member",
+          email: u.email || "",
+          taskClosing: { weighted: taskClosingWeighted, raw: toOneDecimal(closingAverage) },
+          attendance: { weighted: attendanceWeighted, percentage: toOneDecimal(attendancePercentage) },
+          quality: { weighted: qualityWeighted, raw: toOneDecimal(qualityAverage) },
+          manager: { weighted: managerWeighted, raw: toOneDecimal(managerRaw) },
+          kpi: { weighted: kpiWeighted, raw: toOneDecimal(kpiAverage) },
+          total,
+          grade,
+          remarks,
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [users, tasks, kpiData, calculateAttendancePercentage, calculateBehaviorScore]);
 
   // Graph filters for DashboardAnalytics in progress view
   const [graphUserFilter, setGraphUserFilter] = useState(""); // '' => all
@@ -1388,113 +1559,118 @@ export default function AdminDashboard() {
                     </div>
 
                     <div className="mb-6">
-                      <label className="block text-sm font-semibold mb-1">Filter by member</label>
-                      <select
-                        value={selectedMemberForAttendance}
-                        onChange={(e) => setSelectedMemberForAttendance(e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                      >
-                        <option value="">All members</option>
-                        {users.map((u) => (
-                          <option key={u.uid || u.id} value={u.uid || u.id}>
-                            {u.name || u.email}
-                          </option>
-                        ))}
-                      </select>
+                      <label className="block text-sm font-semibold mb-1 text-gray-700">Mark attendance for date</label>
+                      <input
+                        type="date"
+                        value={selectedAttendanceDate}
+                        onChange={(e) => setSelectedAttendanceDate(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-blue-400"
+                      />
                     </div>
 
-                    {!selectedMemberForAttendance && (
-                      <div className="mb-6">
-                        <h3 className="text-lg font-bold mb-2">Members — Attendance %</h3>
+                    {!selectedAttendanceDate ? (
+                      <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-700">
+                        Select a date to start marking attendance for each team member.
+                      </div>
+                    ) : (
+                      <div className="mb-6 overflow-x-auto">
+                        <table className="min-w-full text-sm">
+                          <thead>
+                            <tr className="bg-gray-100">
+                              <th className="p-3 text-left">Employee</th>
+                              <th className="p-3 text-left">Department</th>
+                              <th className="p-3 text-left">Current Status</th>
+                              <th className="p-3 text-left">Quick Mark</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {users.length === 0 ? (
+                              <tr>
+                                <td colSpan={4} className="p-4 text-center text-sm text-gray-500">No employees found. Add team members to start tracking attendance.</td>
+                              </tr>
+                            ) : (
+                              users.map((member) => {
+                                const userId = member.uid || member.id;
+                                const statusKey = `${userId}_${selectedAttendanceDate}`;
+                                const currentStatus = attendanceData[statusKey];
+                                const isSaving = savingAttendanceKey === statusKey;
+                                const statusStyles = currentStatus === "present"
+                                  ? "bg-green-100 text-green-700"
+                                  : currentStatus === "absent"
+                                  ? "bg-red-100 text-red-700"
+                                  : currentStatus === "off"
+                                  ? "bg-blue-100 text-blue-700"
+                                  : "bg-gray-100 text-gray-600";
+                                return (
+                                  <tr key={userId} className="border-b hover:bg-gray-50">
+                                    <td className="p-3 font-semibold text-gray-800">
+                                      {member.name || member.displayName || member.email}
+                                      <div className="text-xs text-gray-500">{member.email}</div>
+                                    </td>
+                                    <td className="p-3 text-gray-600 text-xs md:text-sm">{member.department || "-"}</td>
+                                    <td className="p-3">
+                                      {isSaving ? (
+                                        <span className="text-xs text-gray-500">Updating...</span>
+                                      ) : (
+                                        <span className={`text-xs px-2 py-1 rounded ${statusStyles}`}>
+                                          {currentStatus ? currentStatus : "Not marked"}
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="p-3">
+                                      <div className="flex flex-wrap gap-2">
+                                        <button
+                                          onClick={() => markAttendance(userId, selectedAttendanceDate, "present")}
+                                          className={`text-xs px-3 py-1 rounded transition ${currentStatus === "present" ? "bg-green-600 text-white" : "bg-green-100 text-green-700 hover:bg-green-200"}`}
+                                          disabled={isSaving}
+                                        >
+                                          {isSaving ? "Saving..." : "Present"}
+                                        </button>
+                                        <button
+                                          onClick={() => markAttendance(userId, selectedAttendanceDate, "absent")}
+                                          className={`text-xs px-3 py-1 rounded transition ${currentStatus === "absent" ? "bg-red-600 text-white" : "bg-red-100 text-red-700 hover:bg-red-200"}`}
+                                          disabled={isSaving}
+                                        >
+                                          {isSaving ? "Saving..." : "Absent"}
+                                        </button>
+                                        <button
+                                          onClick={() => markAttendance(userId, selectedAttendanceDate, "off")}
+                                          className={`text-xs px-3 py-1 rounded transition ${currentStatus === "off" ? "bg-blue-600 text-white" : "bg-blue-100 text-blue-700 hover:bg-blue-200"}`}
+                                          disabled={isSaving}
+                                        >
+                                          {isSaving ? "Saving..." : "Off"}
+                                        </button>
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    <div className="mt-8">
+                      <h3 className="text-lg font-bold mb-2">Monthly Attendance Overview</h3>
+                      {attendanceSummaries.length === 0 ? (
+                        <div className="text-sm text-gray-500">No attendance records captured for this month yet.</div>
+                      ) : (
                         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                          {attendanceSummaries.map((m) => (
-                            <div key={m.uid} className="border rounded-lg p-4 cursor-pointer hover:bg-gray-50" onClick={() => setSelectedMemberForAttendance(m.uid)}>
+                          {attendanceSummaries.map((summary) => (
+                            <div key={summary.uid} className="border rounded-lg p-4 bg-white shadow-sm">
                               <div className="flex items-center justify-between">
                                 <div>
-                                  <p className="font-semibold">{m.name}</p>
-                                  <p className="text-xs text-gray-500">Click to mark attendance</p>
+                                  <p className="font-semibold text-gray-800">{summary.name}</p>
+                                  <p className="text-xs text-gray-500">Current month presence</p>
                                 </div>
-                                <div className="text-2xl font-bold text-blue-600">{m.percentage}%</div>
+                                <div className="text-2xl font-bold text-blue-600">{summary.percentage}%</div>
                               </div>
                             </div>
                           ))}
                         </div>
-                      </div>
-                    )}
-
-                    {selectedMemberForAttendance && (
-                      <div>
-                        <div className="mb-4 p-4 bg-blue-50 rounded-lg">
-                          <h3 className="font-bold text-lg">{users.find(u => (u.uid || u.id) === selectedMemberForAttendance)?.name || 'Member'}</h3>
-                          <p className="text-sm text-gray-600">Attendance: <span className="font-bold text-blue-600">{calculateAttendancePercentage(selectedMemberForAttendance)}%</span></p>
-                        </div>
-                        <div className="overflow-x-auto">
-                          <table className="min-w-full text-sm">
-                            <thead>
-                              <tr className="bg-gray-100">
-                                <th className="p-2 text-left">Date</th>
-                                <th className="p-2 text-left">Day</th>
-                                <th className="p-2 text-left">Holiday/Status</th>
-                                <th className="p-2 text-left">Mark Attendance</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {generateCalendarDays(currentMonth, currentYear).map((day) => {
-                                const key = `${selectedMemberForAttendance}_${day.fullDate}`;
-                                const status = attendanceData[key];
-                                const isWeekend = day.isSunday;
-                                const isHoliday = !!day.holiday;
-                                return (
-                                  <tr key={day.date} className={`border-b ${isWeekend ? 'bg-gray-50' : ''} ${isHoliday ? 'bg-yellow-50' : ''}`}>
-                                    <td className="p-2">{day.date}</td>
-                                    <td className="p-2">{day.dayName}</td>
-                                    <td className="p-2">
-                                      {day.holiday && <span className="text-xs bg-yellow-200 px-2 py-1 rounded">{day.holiday}</span>}
-                                      {isWeekend && !day.holiday && <span className="text-xs bg-gray-200 px-2 py-1 rounded">Sunday</span>}
-                                      {!isWeekend && !day.holiday && status && (
-                                        <span className={`text-xs px-2 py-1 rounded ${
-                                          status === 'present' ? 'bg-green-100 text-green-700' :
-                                          status === 'absent' ? 'bg-red-100 text-red-700' :
-                                          'bg-blue-100 text-blue-700'
-                                        }`}>{status}</span>
-                                      )}
-                                    </td>
-                                    <td className="p-2">
-                                      {!isWeekend && !day.holiday && (
-                                        <div className="flex gap-1">
-                                          <button
-                                            onClick={() => markAttendance(selectedMemberForAttendance, day.fullDate, 'present')}
-                                            className={`text-xs px-2 py-1 rounded ${status === 'present' ? 'bg-green-600 text-white' : 'bg-green-100 text-green-700'}`}
-                                            disabled={savingAttendance}
-                                          >
-                                            Present
-                                          </button>
-                                          <button
-                                            onClick={() => markAttendance(selectedMemberForAttendance, day.fullDate, 'absent')}
-                                            className={`text-xs px-2 py-1 rounded ${status === 'absent' ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}`}
-                                            disabled={savingAttendance}
-                                          >
-                                            Absent
-                                          </button>
-                                          <button
-                                            onClick={() => markAttendance(selectedMemberForAttendance, day.fullDate, 'off')}
-                                            className={`text-xs px-2 py-1 rounded ${status === 'off' ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-700'}`}
-                                            disabled={savingAttendance}
-                                          >
-                                            Off
-                                          </button>
-                                        </div>
-                                      )}
-                                      {(isWeekend || isHoliday) && <span className="text-xs text-gray-400">—</span>}
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -1638,7 +1814,7 @@ export default function AdminDashboard() {
                         
                         <h3 className="text-lg font-bold mb-3">📊 Members Quality Score (Out of 100)</h3>
                         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                          {memberSummaries.map((m) => (
+                          {qualitySummaries.map((m) => (
                             <div
                               key={m.idOrEmail}
                               onClick={() => setSelectedMemberForQuality(m.idOrEmail)}
@@ -1671,19 +1847,19 @@ export default function AdminDashboard() {
                             </div>
                           ))}
                         </div>
-                        {memberSummaries.length === 0 && (
+                        {qualitySummaries.length === 0 && (
                           <p className="text-center text-gray-500 py-8">No completed tasks available for quality assessment</p>
                         )}
                       </div>
                     ) : (
                       <div>
                         {(() => {
-                          const memberData = memberSummaries.find(m => m.idOrEmail === selectedMemberForQuality);
+                          const memberData = qualitySummaries.find(m => m.idOrEmail === selectedMemberForQuality);
                           const memberTasks = completedTasks.filter(
                             (t) => t.assignedTo === selectedMemberForQuality || t.assignedEmail === selectedMemberForQuality
                           );
-                          const markedTasks = memberTasks.filter(t => typeof t.closingMark === 'number');
-                          const totalMarks = markedTasks.reduce((sum, t) => sum + (t.closingMark || 0), 0);
+                          const markedTasks = memberTasks.filter(t => typeof t.qualityMark === 'number');
+                          const totalMarks = markedTasks.reduce((sum, t) => sum + (t.qualityMark || 0), 0);
                           const avgMark = markedTasks.length > 0 ? (totalMarks / markedTasks.length).toFixed(1) : 0;
                           
                           return (
@@ -1713,7 +1889,11 @@ export default function AdminDashboard() {
                                   </div>
                                 </div>
                                 <button 
-                                  onClick={() => setSelectedMemberForQuality('')} 
+                                  onClick={() => {
+                                    setSelectedMemberForQuality('');
+                                    setQualityMarksDraft({});
+                                    setSavingQualityMarkTaskId("");
+                                  }} 
                                   className="mt-3 text-sm text-indigo-700 hover:text-indigo-900 font-semibold flex items-center gap-1"
                                 >
                                   ← Back to Members List
@@ -1768,19 +1948,19 @@ export default function AdminDashboard() {
                                             type="number"
                                             min="0"
                                             max="100"
-                                            value={(marksDraft[task.id] ?? task.closingMark ?? "")}
-                                            onChange={(e) => setMarksDraft((prev) => ({ ...prev, [task.id]: e.target.value }))}
+                                            value={(qualityMarksDraft[task.id] ?? task.qualityMark ?? "")}
+                                            onChange={(e) => setQualityMarksDraft((prev) => ({ ...prev, [task.id]: e.target.value }))}
                                             className="w-20 px-2 py-1 border border-gray-300 rounded focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400"
                                             placeholder="0-100"
                                           />
                                         </td>
                                         <td className="p-3">
                                           <button
-                                            onClick={() => saveTaskMark(task.id, marksDraft[task.id] ?? task.closingMark ?? 0)}
+                                            onClick={() => saveQualityMark(task.id, qualityMarksDraft[task.id] ?? task.qualityMark ?? 0)}
                                             className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-3 py-1.5 rounded transition-colors duration-200"
-                                            disabled={savingMarkTaskId === task.id}
+                                            disabled={savingQualityMarkTaskId === task.id}
                                           >
-                                            {savingMarkTaskId === task.id ? "Saving..." : "Save"}
+                                            {savingQualityMarkTaskId === task.id ? "Saving..." : "Save"}
                                           </button>
                                         </td>
                                       </tr>
@@ -2446,34 +2626,88 @@ export default function AdminDashboard() {
           <h3 className="text-lg font-semibold mb-2">Evaluation</h3>
           <div className="text-xs text-gray-500 mb-3">Grades: A (&gt;90), B (85-90), C (80-84), D (70-79), F (&lt;70)</div>
 
-          <div className="max-h-64 overflow-auto mb-2">
-            <table className="min-w-full text-sm">
-              <thead>
-                <tr className="bg-white sticky top-0">
-                  <th className="p-2 text-left">Name</th>
-                  <th className="p-2 text-left">Rate</th>
-                  <th className="p-2 text-left">Grade</th>
-                  <th className="p-2 text-left">Remarks</th>
-                </tr>
-              </thead>
-              <tbody>
-                {evaluation.length === 0 ? (
-                  <tr><td colSpan="4" className="p-2 text-gray-500">No members yet.</td></tr>
-                ) : (
-                  evaluation.map((e) => (
-                    <tr key={e.id} className="border-b hover:bg-white/50">
-                      <td className="p-2">{e.name}</td>
-                      <td className="p-2">{e.rate}%</td>
-                      <td className={`p-2 font-semibold ${e.grade === "A" ? "text-green-600" : e.grade === "B" ? "text-blue-600" : e.grade === "C" ? "text-yellow-600" : e.grade === "D" ? "text-orange-600" : "text-red-600"}`}>{e.grade}</td>
-                      <td className="p-2 text-sm text-red-600">{e.remarks}</td>
+            <div className="max-h-64 overflow-auto mb-2">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="bg-white sticky top-0 text-xs text-gray-500 uppercase tracking-wide">
+                    <th className="p-3 text-left">Employee</th>
+                    <th className="p-3 text-left">
+                      <div>Task Closing</div>
+                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 40 weightage)</div>
+                    </th>
+                    <th className="p-3 text-left">
+                      <div>Attendance</div>
+                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 10 weightage)</div>
+                    </th>
+                    <th className="p-3 text-left">
+                      <div>Quality</div>
+                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 20 weightage)</div>
+                    </th>
+                    <th className="p-3 text-left">
+                      <div>Manager</div>
+                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 20 weightage)</div>
+                    </th>
+                    <th className="p-3 text-left">
+                      <div>KPI</div>
+                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 10 weightage)</div>
+                    </th>
+                    <th className="p-3 text-left">
+                      <div>Total</div>
+                      <div className="text-[10px] font-normal normal-case text-gray-400">(overall out of 100)</div>
+                    </th>
+                    <th className="p-3 text-left">
+                      <div>Grade</div>
+                      <div className="text-[10px] font-normal normal-case text-gray-400">(with remarks)</div>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {evaluation.length === 0 ? (
+                    <tr>
+                      <td colSpan="8" className="p-3 text-gray-500 text-sm">No employees available yet.</td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+                  ) : (
+                    evaluation.map((e) => (
+                      <tr key={e.id} className="border-b hover:bg-white/50">
+                        <td className="p-3 align-top">
+                          <div className="font-semibold text-gray-800">{e.name}</div>
+                          {e.email && <div className="text-xs text-gray-500">{e.email}</div>}
+                        </td>
+                        <td className="p-3 align-top">
+                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.taskClosing.weighted)} / 40</div>
+                          <div className="text-xs text-gray-500">Avg {formatOneDecimalString(e.taskClosing.raw)}%</div>
+                        </td>
+                        <td className="p-3 align-top">
+                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.attendance.weighted)} / 10</div>
+                          <div className="text-xs text-gray-500">Presence {formatOneDecimalString(e.attendance.percentage)}%</div>
+                        </td>
+                        <td className="p-3 align-top">
+                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.quality.weighted)} / 20</div>
+                          <div className="text-xs text-gray-500">Avg {formatOneDecimalString(e.quality.raw)}%</div>
+                        </td>
+                        <td className="p-3 align-top">
+                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.manager.weighted)} / 20</div>
+                          <div className="text-xs text-gray-500">Avg {formatOneDecimalString(e.manager.raw)}%</div>
+                        </td>
+                        <td className="p-3 align-top">
+                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.kpi.weighted)} / 10</div>
+                          <div className="text-xs text-gray-500">Avg {formatOneDecimalString(e.kpi.raw)}%</div>
+                        </td>
+                        <td className="p-3 align-top">
+                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.total)} / 100</div>
+                        </td>
+                        <td className="p-3 align-top">
+                          <div className={`text-sm font-semibold ${gradeColorClass(e.grade)}`}>{e.grade}</div>
+                          <div className="text-xs text-gray-500">{e.remarks}</div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
 
-          <div className="text-xs text-gray-500">Note: "need improvment" shown for F grade.</div>
+            <div className="text-xs text-gray-500">Weights: Task Closing 40, Attendance 10, Quality 20, Manager 20, KPI 10.</div>
         </div>
 
         <div className="mt-2">
