@@ -13,6 +13,13 @@ import {
   CartesianGrid,
 } from "recharts";
 
+const canonicalStatus = (status = "") => {
+  const normalized = status.toString().trim().toLowerCase();
+  if (normalized.includes("complete")) return "completed";
+  if (normalized.includes("delay")) return "delayed";
+  return normalized;
+};
+
 const DashboardAnalytics = ({ tasks }) => {
   const [filter, setFilter] = useState("all");
 
@@ -46,14 +53,19 @@ const DashboardAnalytics = ({ tasks }) => {
   }, [filter, tasks]);
 
   // 🔹 KPIs
-  const totalTasks = filteredTasks.length;
-  const completedTasks = filteredTasks.filter((t) => t.status === "completed").length;
-  const pendingTasks = filteredTasks.filter((t) => t.status !== "completed").length;
-  const activeEmployees = [...new Set(filteredTasks.map((t) => t.assignedEmail))].length;
+  const completedTasks = filteredTasks.filter((t) => canonicalStatus(t.status) === "completed");
+  const delayedTasks = filteredTasks.filter((t) => canonicalStatus(t.status) === "delayed");
+  const totalTasks = completedTasks.length + delayedTasks.length;
+  const activeEmployees = new Set([
+    ...completedTasks.map((t) => t.assignedEmail),
+    ...delayedTasks.map((t) => t.assignedEmail),
+  ]).size;
 
   // 🔹 Chart Data with Due Dates
   const taskStats = {};
   filteredTasks.forEach((task) => {
+    const status = canonicalStatus(task.status);
+    if (status !== "completed" && status !== "delayed") return;
     const email = task.assignedEmail || "Unknown";
     const due =
       task.dueDate?.seconds
@@ -63,20 +75,20 @@ const DashboardAnalytics = ({ tasks }) => {
     if (!taskStats[email]) {
       taskStats[email] = {
         completed: 0,
-        pending: 0,
+        delayed: 0,
         dueDates: [],
         overdue: 0,
       };
     }
 
-    if (task.status === "completed") taskStats[email].completed++;
-    else taskStats[email].pending++;
+    if (status === "completed") taskStats[email].completed++;
+    else if (status === "delayed") taskStats[email].delayed++;
 
     // Track due dates
     taskStats[email].dueDates.push(due);
 
     // Track overdue count
-    if (due < new Date() && task.status !== "completed") {
+    if (due < new Date() && status === "delayed") {
       taskStats[email].overdue++;
     }
   });
@@ -93,7 +105,7 @@ const DashboardAnalytics = ({ tasks }) => {
     return {
       name: email,
       Completed: data.completed,
-      Pending: data.pending,
+      Delayed: data.delayed,
       Overdue: data.overdue,
       NextDue: nextDue,
     };
@@ -117,11 +129,12 @@ const DashboardAnalytics = ({ tasks }) => {
       }
       if (!due) return;
       const key = due.toLocaleDateString();
-      if (!map[key]) map[key] = { date: key, Completed: 0, Pending: 0, Overdue: 0 };
+      if (!map[key]) map[key] = { date: key, Completed: 0, Delayed: 0, Overdue: 0 };
       const now = new Date();
-      if (task.status === "completed") map[key].Completed++;
-      else map[key].Pending++;
-      if (due < now && task.status !== "completed") map[key].Overdue++;
+      const status = canonicalStatus(task.status);
+      if (status === "completed") map[key].Completed++;
+      else if (status === "delayed") map[key].Delayed++;
+      if (due < now && status === "delayed") map[key].Overdue++;
     });
 
     // convert to sorted array
@@ -132,21 +145,29 @@ const DashboardAnalytics = ({ tasks }) => {
     <div className="mt-8">
       {/* 🔹 KPI Summary */}
       <div className="grid md:grid-cols-4 gap-4 mb-8">
-        <div className="bg-white p-5 rounded-2xl shadow text-center">
-          <p className="text-sm text-gray-500">🟢 Total Tasks</p>
-          <h3 className="text-2xl font-bold text-gray-800">{totalTasks}</h3>
+        <div className="bg-white p-5 rounded-2xl shadow">
+          <div className="flex flex-col items-start gap-1">
+            <p className="text-sm text-gray-500">🟢 Total Tasks</p>
+            <h3 className="text-2xl font-bold text-gray-800">{totalTasks}</h3>
+          </div>
         </div>
-        <div className="bg-white p-5 rounded-2xl shadow text-center">
-          <p className="text-sm text-gray-500">✅ Completed</p>
-          <h3 className="text-2xl font-bold text-green-600">{completedTasks}</h3>
+        <div className="bg-white p-5 rounded-2xl shadow">
+          <div className="flex flex-col items-start gap-1">
+            <p className="text-sm text-gray-500">✅ Completed</p>
+            <h3 className="text-2xl font-bold text-green-600">{completedTasks.length}</h3>
+          </div>
         </div>
-        <div className="bg-white p-5 rounded-2xl shadow text-center">
-          <p className="text-sm text-gray-500">🟡 Pending</p>
-          <h3 className="text-2xl font-bold text-yellow-600">{pendingTasks}</h3>
+        <div className="bg-white p-5 rounded-2xl shadow">
+          <div className="flex flex-col items-start gap-1">
+            <p className="text-sm text-gray-500">⏳ Delayed</p>
+            <h3 className="text-2xl font-bold text-red-500">{delayedTasks.length}</h3>
+          </div>
         </div>
-        <div className="bg-white p-5 rounded-2xl shadow text-center">
-          <p className="text-sm text-gray-500">👷 Employees Active</p>
-          <h3 className="text-2xl font-bold text-blue-600">{activeEmployees}</h3>
+        <div className="bg-white p-5 rounded-2xl shadow">
+          <div className="flex flex-col items-start gap-1">
+            <p className="text-sm text-gray-500">👷 Employees Active</p>
+            <h3 className="text-2xl font-bold text-blue-600">{activeEmployees}</h3>
+          </div>
         </div>
       </div>
 
@@ -180,7 +201,7 @@ const DashboardAnalytics = ({ tasks }) => {
                   <Tooltip />
                   <Legend />
                   <Bar dataKey="Completed" fill="#22c55e" />
-                  <Bar dataKey="Pending" fill="#eab308" />
+                  <Bar dataKey="Delayed" fill="#ef4444" />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -197,7 +218,7 @@ const DashboardAnalytics = ({ tasks }) => {
                       <Tooltip />
                       <Legend />
                       <Line type="monotone" dataKey="Completed" stroke="#22c55e" strokeWidth={2} />
-                      <Line type="monotone" dataKey="Pending" stroke="#eab308" strokeWidth={2} />
+                      <Line type="monotone" dataKey="Delayed" stroke="#ef4444" strokeWidth={2} />
                       <Line type="monotone" dataKey="Overdue" stroke="#ef4444" strokeWidth={2} />
                     </LineChart>
                   </ResponsiveContainer>
@@ -224,15 +245,15 @@ const DashboardAnalytics = ({ tasks }) => {
           <h3 className="text-lg font-semibold mb-3">📈 Employee Progress</h3>
           <div className="space-y-4">
             {chartData.map((data) => {
-              const total = data.Completed + data.Pending;
+              const total = data.Completed + data.Delayed;
               const percent = total ? Math.round((data.Completed / total) * 100) : 0;
 
               // 🆕 Get completed tasks' due dates for this employee
               const completedDueDates = filteredTasks
                 .filter(
                   (t) =>
+                    canonicalStatus(t.status) === "completed" &&
                     t.assignedEmail === data.name &&
-                    t.status === "completed" &&
                     t.dueDate
                 )
                 .map((t) =>
@@ -260,8 +281,7 @@ const DashboardAnalytics = ({ tasks }) => {
                   </div>
 
                   <p className="text-xs text-gray-500 mt-1">
-                    ✅ {data.Completed}/{total} completed ({percent}%) — ⚠️{" "}
-                    {data.Overdue} overdue
+                    ✅ {data.Completed}/{total} completed ({percent}%) — ⏳ Delayed: {data.Delayed} — ⚠️ {data.Overdue} overdue
                   </p>
 
                   {/* 🆕 Show completed task due dates */}

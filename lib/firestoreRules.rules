@@ -121,5 +121,18 @@ service cloud.firestore {
       // Delete: Only admins can delete behavior marks
       allow delete: if isAdmin();
     }
+
+    // KPI Scores Collection Rules
+    match /kpi/{kpiId} {
+      // Read: Only admins can read KPI data
+      allow read: if isAdmin();
+
+      // Create: Only admins can create KPI scores
+      allow create: if isAdmin();
+
+      // Update/Delete: Only admins can modify KPI scores
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
   }
 }

@@ -19,9 +19,74 @@ import {
 } from "firebase/firestore";
 import { createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
 import DashboardAnalytics from "./component/DashboardAnalytics";
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
+
+const KPI_MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+const KPI_MONTH_INDEX = KPI_MONTHS.reduce((acc, month, index) => {
+  acc[month] = index;
+  return acc;
+}, {});
+
+const ATTENDANCE_STATUS_CONFIG = {
+  present: {
+    label: "Present",
+    badgeClass: "bg-green-100 text-green-700",
+    button: {
+      active: "bg-green-600 text-white",
+      inactive: "bg-green-100 text-green-700 hover:bg-green-200",
+    },
+  },
+  outdoor: {
+    label: "Outdoor",
+    badgeClass: "bg-emerald-100 text-emerald-700",
+    button: {
+      active: "bg-emerald-600 text-white",
+      inactive: "bg-emerald-100 text-emerald-700 hover:bg-emerald-200",
+    },
+  },
+  shortLeave: {
+    label: "Short leave",
+    badgeClass: "bg-purple-100 text-purple-700",
+    button: {
+      active: "bg-purple-600 text-white",
+      inactive: "bg-purple-100 text-purple-700 hover:bg-purple-200",
+    },
+  },
+  absent: {
+    label: "Absent",
+    badgeClass: "bg-red-100 text-red-700",
+    button: {
+      active: "bg-red-600 text-white",
+      inactive: "bg-red-100 text-red-700 hover:bg-red-200",
+    },
+  },
+  off: {
+    label: "Off",
+    badgeClass: "bg-blue-100 text-blue-700",
+    button: {
+      active: "bg-blue-600 text-white",
+      inactive: "bg-blue-100 text-blue-700 hover:bg-blue-200",
+    },
+  },
+};
+
+const ATTENDANCE_STATUS_ORDER = ["present", "outdoor", "shortLeave", "absent", "off"];
 
 export default function AdminDashboard() {
   const router = useRouter();
@@ -33,7 +98,7 @@ export default function AdminDashboard() {
   const [tasks, setTasks] = useState([]);
   const [title, setTitle] = useState("");
   const [assignedEmail, setAssignedEmail] = useState("");
-  const [selectedUserId, setSelectedUserId] = useState(""); // new: dropdown selection
+  const [selectedUserId, setSelectedUserId] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [users, setUsers] = useState([]);
@@ -68,7 +133,7 @@ export default function AdminDashboard() {
   const [showBulkUserPreview, setShowBulkUserPreview] = useState(false);
 
   // Task priority state (new)
-  const [priority, setPriority] = useState("medium"); // options: low, medium, high
+  const [priority, setPriority] = useState("medium");
   const [reminderOnAdd, setReminderOnAdd] = useState(false);
 
   // delete-mode toggles shown at section headings (right side)
@@ -140,18 +205,16 @@ export default function AdminDashboard() {
   const [selectedMemberForQuality, setSelectedMemberForQuality] = useState("");
   const [qualityMarksDraft, setQualityMarksDraft] = useState({});
   const [savingQualityMarkTaskId, setSavingQualityMarkTaskId] = useState("");
-  // Manager panel state
-  const [showManagerPanel, setShowManagerPanel] = useState(false);
-  const [selectedMemberForManager, setSelectedMemberForManager] = useState("");
-  const [managerBehaviorDate, setManagerBehaviorDate] = useState("");
-  const [managerBehaviorMarks, setManagerBehaviorMarks] = useState("");
-  const [managerBehaviorRemarks, setManagerBehaviorRemarks] = useState("");
-  const [savingBehaviorMark, setSavingBehaviorMark] = useState(false);
-  const [behaviorData, setBehaviorData] = useState({}); // { userId_date: { marks, remarks, timestamp } }
-  const [kpiData, setKpiData] = useState({}); // KPI documents keyed by id
+  const [kpiData, setKpiData] = useState({});
+  const [showKpiPanel, setShowKpiPanel] = useState(false);
+  const [selectedMemberForKpi, setSelectedMemberForKpi] = useState("");
+  const [selectedKpiMonth, setSelectedKpiMonth] = useState("");
+  const [selectedKpiYear, setSelectedKpiYear] = useState(new Date().getFullYear().toString());
+  const [kpiScoreInput, setKpiScoreInput] = useState("");
+  const [savingKpiScore, setSavingKpiScore] = useState(false);
   // Attendance feature state
   const [showAttendancePanel, setShowAttendancePanel] = useState(false);
-  const [attendanceData, setAttendanceData] = useState({}); // { userId_date: "present"|"absent"|"off" }
+  const [attendanceData, setAttendanceData] = useState({});
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const [selectedAttendanceDate, setSelectedAttendanceDate] = useState(() => getTodayISO());
@@ -341,7 +404,7 @@ export default function AdminDashboard() {
   const completedTasks = useMemo(() => {
     return (tasks || []).filter((t) => {
       const s = canonicalStatus(t.status || t.actualStatus || "");
-      return s === "completed";
+      return s === "completed" || s === "delayed";
     });
   }, [tasks]);
 
@@ -359,23 +422,40 @@ export default function AdminDashboard() {
     const grouped = {};
     completedTasks.forEach((t) => {
       const key = t.assignedTo || t.assignedEmail || "unassigned";
-      if (!grouped[key]) grouped[key] = { key, marks: [], count: 0 };
-      grouped[key].count += 1;
+      if (!grouped[key]) {
+        grouped[key] = {
+          key,
+          marks: [],
+          completedCount: 0,
+          delayedCount: 0,
+        };
+      }
+      const status = canonicalStatus(t.status || t.actualStatus || "");
+      if (status === "completed") grouped[key].completedCount += 1;
+      else if (status === "delayed") grouped[key].delayedCount += 1;
       if (typeof t.closingMark === "number") grouped[key].marks.push(t.closingMark);
     });
     return Object.values(grouped).map((g) => {
-      const sum = g.marks.reduce((a, b) => a + b, 0);
-      const denom = g.marks.length * 100;
-      const totalScaled = denom > 0 ? Math.round((sum / denom) * 100) : 0; // out of 100
+      const totalTasks = g.completedCount + g.delayedCount;
+      const completionPercentage = totalTasks > 0 ? Math.round((g.completedCount / totalTasks) * 100) : 0;
       const labelUser = users.find((x) => x.uid === g.key || x.id === g.key || x.email === g.key);
       const name = labelUser ? (labelUser.name || labelUser.email) : g.key;
-      return { idOrEmail: g.key, name, totalOutOf100: totalScaled, tasksCompleted: g.count };
+      return {
+        idOrEmail: g.key,
+        name,
+        totalOutOf100: completionPercentage,
+        tasksCompleted: g.completedCount,
+        tasksDelayed: g.delayedCount,
+        totalTasks,
+      };
     });
   }, [completedTasks, users]);
 
   const qualitySummaries = useMemo(() => {
     const grouped = {};
     completedTasks.forEach((t) => {
+      const status = canonicalStatus(t.status || t.actualStatus || "");
+      if (status !== "completed") return;
       const key = t.assignedTo || t.assignedEmail || "unassigned";
       if (!grouped[key]) grouped[key] = { key, marks: [], count: 0 };
       grouped[key].count += 1;
@@ -397,13 +477,27 @@ export default function AdminDashboard() {
     const list = completedTasks.filter(
       (t) => t.assignedTo === selectedMemberForClosing || t.assignedEmail === selectedMemberForClosing
     );
+    const completedList = list.filter((t) => canonicalStatus(t.status || t.actualStatus || "") === "completed");
+    const delayedList = list.filter((t) => canonicalStatus(t.status || t.actualStatus || "") === "delayed");
+    const totalCount = completedList.length + delayedList.length;
+    const completionRate = totalCount > 0 ? Math.round((completedList.length / totalCount) * 100) : 0;
     const marked = list.filter((t) => typeof t.closingMark === "number");
     const sum = marked.reduce((a, t) => a + (t.closingMark || 0), 0);
     const denom = marked.length * 100;
     const scaled = denom > 0 ? Math.round((sum / denom) * 100) : 0;
     const labelUser = users.find((x) => x.uid === selectedMemberForClosing || x.id === selectedMemberForClosing || x.email === selectedMemberForClosing);
     const name = labelUser ? (labelUser.name || labelUser.email) : selectedMemberForClosing;
-    return { name, sum, denom, scaled, markedCount: marked.length, completedCount: list.length };
+    return {
+      name,
+      sum,
+      denom,
+      scaled,
+      markedCount: marked.length,
+      completedCount: completedList.length,
+      delayedCount: delayedList.length,
+      totalCount,
+      completionRate,
+    };
   }, [selectedMemberForClosing, completedTasks, users]);
 
   const openTaskClosingPanel = () => {
@@ -424,84 +518,6 @@ export default function AdminDashboard() {
     setSelectedMemberForQuality("");
     setQualityMarksDraft({});
     setSavingQualityMarkTaskId("");
-  };
-
-  const openManagerPanel = async () => {
-    setShowManagerPanel(true);
-    // Load behavior data from Firestore
-    try {
-      await loadBehaviorData();
-    } catch (err) {
-      console.error("Failed to load behavior marks:", err);
-    }
-  };
-  
-  const closeManagerPanel = () => {
-    setShowManagerPanel(false);
-    setSelectedMemberForManager("");
-    setManagerBehaviorDate("");
-    setManagerBehaviorMarks("");
-    setManagerBehaviorRemarks("");
-  };
-
-  const saveBehaviorMark = async () => {
-    if (!selectedMemberForManager) {
-      alert("Please select a member");
-      return;
-    }
-    if (!managerBehaviorDate) {
-      alert("Please select a date");
-      return;
-    }
-    const marks = Number(managerBehaviorMarks);
-    if (isNaN(marks) || marks < 0 || marks > 100) {
-      alert("Please enter valid marks between 0 and 100");
-      return;
-    }
-
-    const key = `${selectedMemberForManager}_${managerBehaviorDate}`;
-    try {
-      setSavingBehaviorMark(true);
-      await setDoc(doc(db, "behaviorMarks", key), {
-        userId: selectedMemberForManager,
-        date: managerBehaviorDate,
-        marks: marks,
-        remarks: managerBehaviorRemarks,
-        markedAt: serverTimestamp(),
-      });
-      setBehaviorData((prev) => ({
-        ...prev,
-        [key]: { marks, remarks: managerBehaviorRemarks, date: managerBehaviorDate },
-      }));
-      alert("✓ Behavior mark saved successfully");
-      setManagerBehaviorMarks("");
-      setManagerBehaviorRemarks("");
-    } catch (err) {
-      console.error("Failed to save behavior mark:", err);
-      alert("Failed to save: " + (err?.message || err));
-    } finally {
-      setSavingBehaviorMark(false);
-    }
-  };
-
-  const calculateBehaviorScore = useCallback((userId) => {
-    const userMarks = Object.entries(behaviorData)
-      .filter(([key]) => key.startsWith(`${userId}_`))
-      .map(([_, data]) => data.marks);
-    if (userMarks.length === 0) return 0;
-    const sum = userMarks.reduce((a, b) => a + b, 0);
-    return Math.round(sum / userMarks.length);
-  }, [behaviorData]);
-
-  const getMemberBehaviorRecords = (userId) => {
-    return Object.entries(behaviorData)
-      .filter(([key]) => key.startsWith(`${userId}_`))
-      .map(([key, data]) => ({
-        date: data.date,
-        marks: data.marks,
-        remarks: data.remarks,
-      }))
-      .sort((a, b) => new Date(b.date) - new Date(a.date));
   };
 
   const saveTaskMark = async (taskId, value) => {
@@ -588,19 +604,6 @@ export default function AdminDashboard() {
     }
   }, []);
 
-  const loadBehaviorData = useCallback(async () => {
-    try {
-      const behaviorSnap = await getDocs(collection(db, "behaviorMarks"));
-      const data = {};
-      behaviorSnap.forEach((docSnap) => {
-        data[docSnap.id] = docSnap.data();
-      });
-      setBehaviorData(data);
-    } catch (err) {
-      console.error("Failed to load behavior marks:", err);
-    }
-  }, []);
-
   const loadKpiData = useCallback(async () => {
     try {
       const kpiSnap = await getDocs(collection(db, "kpi"));
@@ -620,10 +623,9 @@ export default function AdminDashboard() {
     if (!user) return;
     ensureAdminProfile().then(() => {
       loadAttendanceData();
-      loadBehaviorData();
       loadKpiData();
     });
-  }, [authReady, ensureAdminProfile, loadAttendanceData, loadBehaviorData, loadKpiData]);
+  }, [authReady, ensureAdminProfile, loadAttendanceData, loadKpiData]);
 
   const openAttendancePanel = async () => {
     setShowAttendancePanel(true);
@@ -636,9 +638,105 @@ export default function AdminDashboard() {
     }
   };
 
+  const openKpiPanel = async () => {
+    setShowKpiPanel(true);
+    const firstEmployee = employeeMembers[0];
+    if (firstEmployee && !selectedMemberForKpi) {
+      setSelectedMemberForKpi(firstEmployee.uid || firstEmployee.id || firstEmployee.email || "");
+    }
+    try {
+      await loadKpiData();
+    } catch (err) {
+      console.error("Failed to refresh KPI data:", err);
+    }
+  };
+
+  const closeKpiPanel = () => {
+    setShowKpiPanel(false);
+    setSelectedKpiMonth("");
+    setKpiScoreInput("");
+    setSavingKpiScore(false);
+  };
+
   const closeAttendancePanel = () => {
     setShowAttendancePanel(false);
     setSavingAttendanceKey("");
+  };
+
+  const saveKpiScore = async () => {
+    if (!selectedMemberForKpi) {
+      alert("Select an employee before saving a KPI score.");
+      return;
+    }
+
+    if (!selectedKpiMonth || !selectedKpiYear) {
+      alert("Select both month and year for the KPI score.");
+      return;
+    }
+
+    const scoreText = `${kpiScoreInput}`.trim();
+    if (!scoreText) {
+      alert("Enter a KPI score before saving.");
+      return;
+    }
+
+    const scoreValue = Number(scoreText);
+    if (Number.isNaN(scoreValue)) {
+      alert("Enter a numeric KPI score between 0 and 100.");
+      return;
+    }
+
+    if (scoreValue < 0 || scoreValue > 100) {
+      alert("KPI score must be within 0 and 100.");
+      return;
+    }
+
+    if (pendingKpiScoreExists) {
+      const name = selectedKpiMember?.name
+        || selectedKpiMember?.displayName
+        || selectedKpiMember?.email
+        || "This member";
+      alert(`${name} already has a KPI score for ${selectedKpiMonth} ${selectedKpiYear}.`);
+      return;
+    }
+
+    const member = selectedKpiMember
+      || employeeMembers.find((entry) => (entry.uid || entry.id || entry.email) === selectedMemberForKpi)
+      || null;
+    const memberName = member?.name || member?.displayName || member?.email || "Member";
+    const memberEmail = member?.email || "";
+
+    const docId = `${selectedMemberForKpi}_${selectedKpiYear}_${selectedKpiMonth}`;
+    const kpiRef = doc(db, "kpi", docId);
+
+    setSavingKpiScore(true);
+    try {
+      const existing = await getDoc(kpiRef);
+      if (existing.exists()) {
+        alert(`${memberName} already has a KPI score for ${selectedKpiMonth} ${selectedKpiYear}.`);
+        return;
+      }
+
+      await setDoc(kpiRef, {
+        userId: selectedMemberForKpi,
+        userName: memberName,
+        userEmail: memberEmail,
+        month: selectedKpiMonth,
+        year: selectedKpiYear,
+        score: scoreValue,
+        addedBy: auth.currentUser ? auth.currentUser.uid : "admin",
+        addedAt: serverTimestamp(),
+      });
+
+      await loadKpiData();
+      setKpiScoreInput("");
+      alert(`Saved KPI score for ${memberName} (${selectedKpiMonth} ${selectedKpiYear}).`);
+    } catch (err) {
+      console.error("Failed to save KPI score:", err);
+      alert("Failed to save KPI score: " + (err?.message || err));
+    } finally {
+      setSavingKpiScore(false);
+    }
   };
 
   const markAttendance = async (userId, dateStr, status) => {
@@ -669,8 +767,9 @@ export default function AdminDashboard() {
       return;
     }
     
+    const actionLabel = ATTENDANCE_STATUS_CONFIG[bulkAttendanceAction]?.label || bulkAttendanceAction;
     const confirmed = window.confirm(
-      `Are you sure you want to mark ALL employees as "${bulkAttendanceAction.toUpperCase()}" for ${bulkAttendanceDate}?`
+      `Are you sure you want to mark ALL employees as "${actionLabel}" for ${bulkAttendanceDate}?`
     );
     
     if (!confirmed) return;
@@ -715,31 +814,68 @@ export default function AdminDashboard() {
     }
   };
 
-  const calculateAttendancePercentage = useCallback((userId) => {
+  const calculateAttendanceMetrics = useCallback((userId) => {
     const days = generateCalendarDays(currentMonth, currentYear);
     const workingDays = days.filter((d) => !d.isSunday && !d.holiday);
-    let considered = 0;
-    let present = 0;
+    const counts = {
+      present: 0,
+      outdoor: 0,
+      shortLeave: 0,
+      absent: 0,
+      off: 0,
+    };
+
     workingDays.forEach((day) => {
       const key = `${userId}_${day.fullDate}`;
       const status = attendanceData[key];
+      if (status === "off") {
+        counts.off += 1;
+        return;
+      }
       if (status === "present") {
-        considered++;
-        present++;
-      } else if (status === "absent") {
-        considered++;
+        counts.present += 1;
+        return;
+      }
+      if (status === "outdoor") {
+        counts.outdoor += 1;
+        return;
+      }
+      if (status === "shortLeave") {
+        counts.shortLeave += 1;
+        return;
+      }
+      if (status === "absent") {
+        counts.absent += 1;
       }
     });
-    return considered > 0 ? Math.round((present / considered) * 100) : 0;
+
+    const numerator = counts.present + counts.outdoor + counts.shortLeave * 0.8;
+    const denominator = counts.present + counts.outdoor + counts.shortLeave + counts.absent;
+    const percentage = denominator > 0 ? (numerator / denominator) * 100 : 0;
+
+    return { ...counts, percentage };
   }, [attendanceData, currentMonth, currentYear, generateCalendarDays]);
+
+  const calculateAttendancePercentage = useCallback((userId) => {
+    return calculateAttendanceMetrics(userId).percentage;
+  }, [calculateAttendanceMetrics]);
 
   const attendanceSummaries = useMemo(() => {
     return users.map((u) => {
       const uid = u.uid || u.id;
-      const percentage = calculateAttendancePercentage(uid);
-      return { uid, name: u.name || u.email, percentage };
+      const metrics = calculateAttendanceMetrics(uid);
+      return {
+        uid,
+        name: u.name || u.email,
+        present: metrics.present,
+        outdoor: metrics.outdoor,
+        shortLeave: metrics.shortLeave,
+        absent: metrics.absent,
+        off: metrics.off,
+        percentage: metrics.percentage,
+      };
     });
-  }, [users, calculateAttendancePercentage]);
+  }, [users, calculateAttendanceMetrics]);
 
   // 🔹 Add Task (assign by dropdown or email + start & end dates + priority)
   const addTask = async (e) => {
@@ -1033,22 +1169,52 @@ export default function AdminDashboard() {
   };
 
   const gradeFromTotal = (score) => {
-    if (score >= 90) return { grade: "A", remarks: "Outstanding performance" };
-    if (score >= 80) return { grade: "B", remarks: "Strong and consistent" };
-    if (score >= 70) return { grade: "C", remarks: "Solid progress" };
-    if (score >= 60) return { grade: "D", remarks: "Needs coaching" };
-    return { grade: "F", remarks: "Immediate improvement required" };
+    if (score >= 91) return "A";
+    if (score >= 81) return "B";
+    return "C";
   };
 
   const gradeColorClass = (grade) => {
     if (grade === "A") return "text-green-600";
-    if (grade === "B") return "text-blue-600";
-    if (grade === "C") return "text-yellow-600";
-    if (grade === "D") return "text-orange-600";
+    if (grade === "B") return "text-yellow-600";
     return "text-red-600";
   };
 
   const formatOneDecimalString = (value) => toOneDecimal(value).toFixed(1);
+
+  const employeeMembers = useMemo(() => (
+    (users || []).filter((member) => (member.role || "employee").toLowerCase() === "employee")
+  ), [users]);
+
+  const selectedKpiMember = useMemo(() => (
+    employeeMembers.find((member) => (member.uid || member.id || member.email) === selectedMemberForKpi) || null
+  ), [employeeMembers, selectedMemberForKpi]);
+
+  const selectedMemberKpiHistory = useMemo(() => {
+    if (!selectedMemberForKpi) return [];
+    return Object.values(kpiData || {})
+      .filter((entry) => entry.userId === selectedMemberForKpi)
+      .sort((a, b) => {
+        const yearDiff = (Number(b.year) || 0) - (Number(a.year) || 0);
+        if (yearDiff !== 0) return yearDiff;
+        const monthA = KPI_MONTH_INDEX[a.month] ?? -1;
+        const monthB = KPI_MONTH_INDEX[b.month] ?? -1;
+        return monthB - monthA;
+      });
+  }, [selectedMemberForKpi, kpiData]);
+
+  const selectedMemberAverageKpi = useMemo(() => {
+    if (!selectedMemberKpiHistory.length) return 0;
+    const scores = selectedMemberKpiHistory.map((entry) => Number(entry.score) || 0);
+    return Math.round(calcAverage(scores));
+  }, [selectedMemberKpiHistory]);
+
+  const pendingKpiScoreKey = useMemo(() => {
+    if (!selectedMemberForKpi || !selectedKpiMonth || !selectedKpiYear) return null;
+    return `${selectedMemberForKpi}_${selectedKpiYear}_${selectedKpiMonth}`;
+  }, [selectedMemberForKpi, selectedKpiMonth, selectedKpiYear]);
+
+  const pendingKpiScoreExists = pendingKpiScoreKey ? kpiData[pendingKpiScoreKey] : null;
 
   // 🔹 Evaluation: aggregate weighted scores across modules
   const evaluation = useMemo(() => {
@@ -1072,23 +1238,29 @@ export default function AdminDashboard() {
           return matchesId || matchesEmail;
         });
 
-        const closingMarks = userTasks
-          .map((task) => (typeof task.closingMark === "number" ? task.closingMark : null))
-          .filter((mark) => typeof mark === "number");
-        const closingAverage = calcAverage(closingMarks);
-        const taskClosingWeighted = toOneDecimal((closingAverage / 100) * 40);
+        const completionCounts = userTasks.reduce(
+          (acc, task) => {
+            const status = canonicalStatus(task.status || task.actualStatus || "");
+            if (status === "completed") acc.completed += 1;
+            else if (status === "delayed") acc.delayed += 1;
+            return acc;
+          },
+          { completed: 0, delayed: 0 }
+        );
+        const trackedTotal = completionCounts.completed + completionCounts.delayed;
+        const completionPercentage = trackedTotal > 0
+          ? (completionCounts.completed / trackedTotal) * 100
+          : 0;
+        const taskClosingWeighted = toOneDecimal((completionPercentage / 100) * 50);
 
-          const qualityMarks = userTasks
-            .map((task) => (typeof task.qualityMark === "number" ? task.qualityMark : null))
-            .filter((mark) => typeof mark === "number");
+        const qualityMarks = userTasks
+          .map((task) => (typeof task.qualityMark === "number" ? task.qualityMark : null))
+          .filter((mark) => typeof mark === "number");
         const qualityAverage = calcAverage(qualityMarks);
         const qualityWeighted = toOneDecimal((qualityAverage / 100) * 20);
 
         const attendancePercentage = calculateAttendancePercentage(userId);
-        const attendanceWeighted = toOneDecimal((attendancePercentage / 100) * 10);
-
-        const managerRaw = calculateBehaviorScore(userId);
-        const managerWeighted = toOneDecimal((managerRaw / 100) * 20);
+        const attendanceWeighted = toOneDecimal((attendancePercentage / 100) * 15);
 
         const userKpis = kpiEntries.filter((entry) => {
           if (!entry || typeof entry !== "object") return false;
@@ -1098,29 +1270,27 @@ export default function AdminDashboard() {
           return false;
         });
         const kpiAverage = calcAverage(userKpis.map((entry) => Number(entry.score) || 0));
-        const kpiWeighted = toOneDecimal((kpiAverage / 100) * 10);
+        const kpiWeighted = toOneDecimal((kpiAverage / 100) * 15);
 
         const total = toOneDecimal(
-          taskClosingWeighted + attendanceWeighted + qualityWeighted + managerWeighted + kpiWeighted
+          taskClosingWeighted + attendanceWeighted + qualityWeighted + kpiWeighted
         );
-        const { grade, remarks } = gradeFromTotal(total);
+        const grade = gradeFromTotal(total);
 
         return {
           id: userId,
           name: u.name || u.displayName || u.email || "Member",
           email: u.email || "",
-          taskClosing: { weighted: taskClosingWeighted, raw: toOneDecimal(closingAverage) },
+          taskClosing: { weighted: taskClosingWeighted, raw: toOneDecimal(completionPercentage) },
           attendance: { weighted: attendanceWeighted, percentage: toOneDecimal(attendancePercentage) },
           quality: { weighted: qualityWeighted, raw: toOneDecimal(qualityAverage) },
-          manager: { weighted: managerWeighted, raw: toOneDecimal(managerRaw) },
           kpi: { weighted: kpiWeighted, raw: toOneDecimal(kpiAverage) },
           total,
           grade,
-          remarks,
         };
       })
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [users, tasks, kpiData, calculateAttendancePercentage, calculateBehaviorScore]);
+  }, [users, tasks, kpiData, calculateAttendancePercentage]);
 
   // Graph filters for DashboardAnalytics in progress view
   const [graphUserFilter, setGraphUserFilter] = useState(""); // '' => all
@@ -1406,8 +1576,7 @@ export default function AdminDashboard() {
                 <button onClick={openTaskClosingPanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">Task closing</button>
                 <button onClick={openAttendancePanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">Attendence</button>
                 <button onClick={openQualityPanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">Quality of work</button>
-                <button onClick={openManagerPanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">Manager</button>
-                <button className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">KPI</button>
+                <button onClick={openKpiPanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">KPI</button>
               </div>
               <p className="mb-1">Quick Actions</p>
                 <div className="flex flex-col gap-2">
@@ -1594,13 +1763,9 @@ export default function AdminDashboard() {
                                 const statusKey = `${userId}_${selectedAttendanceDate}`;
                                 const currentStatus = attendanceData[statusKey];
                                 const isSaving = savingAttendanceKey === statusKey;
-                                const statusStyles = currentStatus === "present"
-                                  ? "bg-green-100 text-green-700"
-                                  : currentStatus === "absent"
-                                  ? "bg-red-100 text-red-700"
-                                  : currentStatus === "off"
-                                  ? "bg-blue-100 text-blue-700"
-                                  : "bg-gray-100 text-gray-600";
+                                const statusConfig = ATTENDANCE_STATUS_CONFIG[currentStatus];
+                                const statusStyles = statusConfig?.badgeClass || "bg-gray-100 text-gray-600";
+                                const statusLabel = statusConfig?.label || (currentStatus ? currentStatus : "Not marked");
                                 return (
                                   <tr key={userId} className="border-b hover:bg-gray-50">
                                     <td className="p-3 font-semibold text-gray-800">
@@ -1613,33 +1778,28 @@ export default function AdminDashboard() {
                                         <span className="text-xs text-gray-500">Updating...</span>
                                       ) : (
                                         <span className={`text-xs px-2 py-1 rounded ${statusStyles}`}>
-                                          {currentStatus ? currentStatus : "Not marked"}
+                                          {statusLabel}
                                         </span>
                                       )}
                                     </td>
                                     <td className="p-3">
                                       <div className="flex flex-wrap gap-2">
-                                        <button
-                                          onClick={() => markAttendance(userId, selectedAttendanceDate, "present")}
-                                          className={`text-xs px-3 py-1 rounded transition ${currentStatus === "present" ? "bg-green-600 text-white" : "bg-green-100 text-green-700 hover:bg-green-200"}`}
-                                          disabled={isSaving}
-                                        >
-                                          {isSaving ? "Saving..." : "Present"}
-                                        </button>
-                                        <button
-                                          onClick={() => markAttendance(userId, selectedAttendanceDate, "absent")}
-                                          className={`text-xs px-3 py-1 rounded transition ${currentStatus === "absent" ? "bg-red-600 text-white" : "bg-red-100 text-red-700 hover:bg-red-200"}`}
-                                          disabled={isSaving}
-                                        >
-                                          {isSaving ? "Saving..." : "Absent"}
-                                        </button>
-                                        <button
-                                          onClick={() => markAttendance(userId, selectedAttendanceDate, "off")}
-                                          className={`text-xs px-3 py-1 rounded transition ${currentStatus === "off" ? "bg-blue-600 text-white" : "bg-blue-100 text-blue-700 hover:bg-blue-200"}`}
-                                          disabled={isSaving}
-                                        >
-                                          {isSaving ? "Saving..." : "Off"}
-                                        </button>
+                                        {ATTENDANCE_STATUS_ORDER.map((statusKey) => {
+                                          const optionConfig = ATTENDANCE_STATUS_CONFIG[statusKey];
+                                          const isActive = currentStatus === statusKey;
+                                          const activeClass = optionConfig?.button?.active || "bg-indigo-600 text-white";
+                                          const inactiveClass = optionConfig?.button?.inactive || "bg-gray-100 text-gray-700 hover:bg-gray-200";
+                                          return (
+                                            <button
+                                              key={statusKey}
+                                              onClick={() => markAttendance(userId, selectedAttendanceDate, statusKey)}
+                                              className={`text-xs px-3 py-1 rounded transition ${isActive ? activeClass : inactiveClass}`}
+                                              disabled={isSaving}
+                                            >
+                                              {isSaving ? "Saving..." : (optionConfig?.label || statusKey)}
+                                            </button>
+                                          );
+                                        })}
                                       </div>
                                     </td>
                                   </tr>
@@ -1659,18 +1819,200 @@ export default function AdminDashboard() {
                         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
                           {attendanceSummaries.map((summary) => (
                             <div key={summary.uid} className="border rounded-lg p-4 bg-white shadow-sm">
-                              <div className="flex items-center justify-between">
-                                <div>
-                                  <p className="font-semibold text-gray-800">{summary.name}</p>
-                                  <p className="text-xs text-gray-500">Current month presence</p>
-                                </div>
-                                <div className="text-2xl font-bold text-blue-600">{summary.percentage}%</div>
+                              <div>
+                                <p className="font-semibold text-gray-800">{summary.name}</p>
+                                <p className="text-xs text-gray-500">Monthly attendance summary</p>
                               </div>
+                              <div className="mt-4 grid grid-cols-2 gap-3 text-xs sm:text-sm">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-gray-500">Present</span>
+                                  <span className="font-semibold text-gray-800">{summary.present}</span>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-gray-500">Outdoor</span>
+                                  <span className="font-semibold text-gray-800">{summary.outdoor}</span>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-gray-500">Short leaves</span>
+                                  <span className="font-semibold text-gray-800">{summary.shortLeave}</span>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-gray-500">Absents</span>
+                                  <span className="font-semibold text-gray-800">{summary.absent}</span>
+                                </div>
+                              </div>
+                              <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between">
+                                <span className="text-xs uppercase tracking-wide text-gray-500">Attendance %</span>
+                                <span className="text-lg font-bold text-blue-600">{toOneDecimal(summary.percentage)}%</span>
+                              </div>
+                              {summary.off > 0 && (
+                                <div className="mt-2 text-[11px] text-gray-400">Off days excluded: {summary.off}</div>
+                              )}
                             </div>
                           ))}
                         </div>
                       )}
                     </div>
+                  </div>
+                </div>
+              )}
+
+              {/* KPI Panel */}
+              {showKpiPanel && (
+                <div className="fixed left-72 right-6 top-6 z-50 animate-slide-down max-h-[90vh] overflow-auto">
+                  <div className="bg-white p-6 rounded-2xl shadow-lg relative">
+                    <div className="absolute right-3 top-3 flex gap-2">
+                      <button onClick={closeKpiPanel} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
+                    </div>
+                    <h2 className="text-xl font-semibold mb-4">📊 KPI Management</h2>
+
+                    <div className="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                      <p className="text-sm text-blue-800">
+                        <span className="font-semibold">Monthly KPI:</span> Record one score per member per month. Scores are out of 100 and contribute 15 marks to the evaluation weighting.
+                      </p>
+                    </div>
+
+                    <h3 className="text-lg font-bold mb-3">Select a Team Member</h3>
+                    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+                      {employeeMembers.length === 0 ? (
+                        <div className="col-span-full text-sm text-gray-500">No employees found. Add team members to begin tracking KPI scores.</div>
+                      ) : (
+                        employeeMembers.map((member) => {
+                          const userId = member.uid || member.id || member.email;
+                          const memberEntries = Object.values(kpiData || {}).filter((entry) => entry.userId === userId);
+                          const averageScore = memberEntries.length ? Math.round(calcAverage(memberEntries.map((entry) => Number(entry.score) || 0))) : 0;
+                          const monthsTracked = memberEntries.length;
+                          const isSelected = selectedMemberForKpi === userId;
+                          const displayName = member.name || member.displayName || member.email || "Member";
+                          return (
+                            <button
+                              key={userId}
+                              type="button"
+                              onClick={() => {
+                                setSelectedMemberForKpi(userId);
+                                setSelectedKpiMonth("");
+                                setKpiScoreInput("");
+                              }}
+                              className={`border-2 rounded-lg p-4 text-left transition ${
+                                isSelected
+                                  ? "border-blue-500 bg-blue-50 shadow-md"
+                                  : "border-transparent bg-gray-50 hover:border-blue-300 hover:bg-blue-50"
+                              }`}
+                            >
+                              <div className="font-semibold text-gray-800">{displayName}</div>
+                              <div className="text-xs text-gray-500">{member.department || "Department not set"}</div>
+                              <div className="flex items-center justify-between mt-3 text-sm">
+                                <span className="text-gray-600">Avg Score</span>
+                                <span className="font-semibold text-blue-600">{averageScore}</span>
+                              </div>
+                              <div className="flex items-center justify-between text-xs text-gray-500 mt-1">
+                                <span>Months Recorded</span>
+                                <span>{monthsTracked}</span>
+                              </div>
+                              {isSelected && <div className="mt-2 text-xs font-semibold text-blue-600">Selected</div>}
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+
+                    {selectedKpiMember ? (
+                      <div className="grid lg:grid-cols-2 gap-6">
+                        <div className="space-y-4">
+                          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                            <h4 className="text-md font-semibold text-gray-800">{selectedKpiMember.name || selectedKpiMember.displayName || selectedKpiMember.email}</h4>
+                            <p className="text-xs text-gray-500 mt-1">Overall average KPI: <span className="font-semibold text-blue-600">{selectedMemberAverageKpi}</span></p>
+                            <p className="text-xs text-gray-500">Recorded months: <span className="font-semibold text-gray-700">{selectedMemberKpiHistory.length}</span></p>
+                          </div>
+
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div>
+                              <label className="block text-sm font-semibold mb-2">Month</label>
+                              <select
+                                value={selectedKpiMonth}
+                                onChange={(e) => setSelectedKpiMonth(e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                              >
+                                <option value="">-- Select Month --</option>
+                                {KPI_MONTHS.map((month) => (
+                                  <option key={month} value={month}>{month}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-sm font-semibold mb-2">Year</label>
+                              <select
+                                value={selectedKpiYear}
+                                onChange={(e) => setSelectedKpiYear(e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                              >
+                                {["2024", "2025", "2026", "2027"].map((yearOption) => (
+                                  <option key={yearOption} value={yearOption}>{yearOption}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-sm font-semibold mb-2">Score (0-100)</label>
+                              <input
+                                type="number"
+                                min="0"
+                                max="100"
+                                value={kpiScoreInput}
+                                onChange={(e) => setKpiScoreInput(e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                                placeholder="0-100"
+                              />
+                            </div>
+                          </div>
+
+                          {pendingKpiScoreExists && (
+                            <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-3">
+                              A KPI score already exists for {selectedKpiMonth} {selectedKpiYear}. Please choose a different month.
+                            </div>
+                          )}
+
+                          <div className="flex justify-end">
+                            <button
+                              onClick={saveKpiScore}
+                              disabled={savingKpiScore || !selectedKpiMonth || !kpiScoreInput || !!pendingKpiScoreExists}
+                              className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-5 py-2 rounded-lg disabled:bg-gray-400 disabled:cursor-not-allowed"
+                            >
+                              {savingKpiScore ? "Saving..." : "Save KPI Score"}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                          <h4 className="text-md font-semibold mb-3">Recorded KPI Scores</h4>
+                          {selectedMemberKpiHistory.length === 0 ? (
+                            <p className="text-sm text-gray-500">No KPI scores recorded yet for this member.</p>
+                          ) : (
+                            <div className="max-h-64 overflow-auto">
+                              <table className="min-w-full text-sm">
+                                <thead>
+                                  <tr className="bg-gray-100 text-left text-xs uppercase text-gray-500">
+                                    <th className="p-2">Month</th>
+                                    <th className="p-2">Score</th>
+                                    <th className="p-2">Weighted (15)</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {selectedMemberKpiHistory.map((entry) => (
+                                    <tr key={entry.id} className="border-b">
+                                      <td className="p-2 text-gray-700">{entry.month} {entry.year}</td>
+                                      <td className="p-2 text-gray-700">{entry.score}</td>
+                                      <td className="p-2 text-gray-500">{(((Number(entry.score) || 0) / 100) * 15).toFixed(1)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-sm text-gray-500">Select a member above to record a KPI score.</div>
+                    )}
                   </div>
                 </div>
               )}
@@ -1681,7 +2023,7 @@ export default function AdminDashboard() {
                       <div className="absolute right-3 top-3 flex gap-2">
                         <button onClick={closeTaskClosingPanel} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
                       </div>
-                      <h2 className="text-xl font-semibold mb-4">📋 Task Closing</h2>
+                      <h2 className="text-xl font-semibold mb-4">📊 Task Completion Tracking (Completed & Delayed)</h2>
                       <div className="grid gap-4 md:grid-cols-3 mb-4">
                         <div className="md:col-span-2">
                           <label className="block text-sm font-semibold mb-1">Filter by member</label>
@@ -1699,7 +2041,10 @@ export default function AdminDashboard() {
                           </select>
                         </div>
                         <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3">
-                          <p className="text-sm text-indigo-700">Each task is marked out of 100. Member total is the sum of their task marks, normalized back to 100.</p>
+                          <p className="text-sm text-indigo-700">
+                            <strong>How totals are calculated:</strong> For each person we track tasks marked as <em>completed</em> or <em>delayed</em> from the All Tasks list.
+                            Completion % = (Completed ÷ (Completed + Delayed)) × 100. Use this panel to mark closing scores (0-100) for quality review.
+                          </p>
                         </div>
                       </div>
 
@@ -1707,7 +2052,13 @@ export default function AdminDashboard() {
                         <div className="mb-6 bg-blue-50 border border-blue-200 rounded-lg p-3 flex items-center justify-between">
                           <div>
                             <p className="font-semibold">{selectedMemberSummary.name}</p>
-                            <p className="text-sm text-blue-700">Overall: {selectedMemberSummary.scaled}/100 ({selectedMemberSummary.sum}/{selectedMemberSummary.denom}) — Marked {selectedMemberSummary.markedCount} of {selectedMemberSummary.completedCount} completed tasks</p>
+                            <p className="text-sm text-blue-700">
+                              Completion rate: {selectedMemberSummary.completionRate}% ({selectedMemberSummary.completedCount}/{selectedMemberSummary.totalCount} tasks) · Delayed: {selectedMemberSummary.delayedCount}
+                              <span className="block text-xs text-blue-600 mt-1">
+                                Closing marks recorded: {selectedMemberSummary.markedCount} task(s)
+                                {selectedMemberSummary.denom > 0 ? ` — Sum ${selectedMemberSummary.sum} / ${selectedMemberSummary.denom}` : ""}
+                              </span>
+                            </p>
                           </div>
                           <button onClick={() => setSelectedMemberForClosing("")} className="text-sm px-3 py-1 rounded bg-white border border-blue-200 hover:bg-blue-100">Clear</button>
                         </div>
@@ -1715,7 +2066,7 @@ export default function AdminDashboard() {
 
                       {!selectedMemberForClosing && (
                         <div className="mb-6">
-                          <h3 className="text-lg font-bold mb-2">Members — Total (out of 100)</h3>
+                          <h3 className="text-lg font-bold mb-2">Members — Task Completion Percentage</h3>
                           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
                             {memberSummaries.map((m) => (
                               <div
@@ -1726,10 +2077,12 @@ export default function AdminDashboard() {
                                 <div className="flex items-center justify-between">
                                   <div>
                                     <p className="font-semibold">{m.name}</p>
-                                    <p className="text-xs text-gray-500">Completed: {m.tasksCompleted}</p>
+                                    <p className="text-xs text-green-600">Completed: {m.tasksCompleted}</p>
+                                    <p className="text-xs text-red-600">Delayed: {m.tasksDelayed}</p>
+                                    <p className="text-xs text-gray-600 font-medium">Total: {m.totalTasks}</p>
                                   </div>
                                   <div className="text-right">
-                                    <div className="text-2xl font-bold text-indigo-600">{m.totalOutOf100}</div>
+                                    <div className="text-2xl font-bold text-indigo-600">{m.totalOutOf100}%</div>
                                     <button
                                       onClick={(e) => { e.stopPropagation(); setSelectedMemberForClosing(m.idOrEmail); }}
                                       className="mt-1 text-xs text-indigo-700 hover:underline"
@@ -1762,7 +2115,14 @@ export default function AdminDashboard() {
                                 <tr key={task.id} className="border-b">
                                   <td className="p-2">{task.title}</td>
                                   <td className="p-2">{memberNameByTask(task)}</td>
-                                  <td className="p-2"><span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">completed</span></td>
+                                  <td className="p-2">
+                                    {(() => {
+                                      const status = canonicalStatus(task.status || task.actualStatus || "");
+                                      const isCompleted = status === "completed";
+                                      const badgeClass = isCompleted ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700";
+                                      return <span className={`text-xs px-2 py-1 rounded ${badgeClass}`}>{status}</span>;
+                                    })()}
+                                  </td>
                                   <td className="p-2">
                                     <input
                                       type="number"
@@ -1788,7 +2148,7 @@ export default function AdminDashboard() {
                           </tbody>
                         </table>
                         {completedTasks.filter((t) => !selectedMemberForClosing || t.assignedTo === selectedMemberForClosing || t.assignedEmail === selectedMemberForClosing).length === 0 && (
-                          <p className="p-4 text-center text-gray-500">No completed tasks for this selection</p>
+                          <p className="p-4 text-center text-gray-500">No completed or delayed tasks for this selection</p>
                         )}
                       </div>
                     </div>
@@ -1858,7 +2218,8 @@ export default function AdminDashboard() {
                           const memberTasks = completedTasks.filter(
                             (t) => t.assignedTo === selectedMemberForQuality || t.assignedEmail === selectedMemberForQuality
                           );
-                          const markedTasks = memberTasks.filter(t => typeof t.qualityMark === 'number');
+                          const completedOnly = memberTasks.filter((t) => canonicalStatus(t.status || t.actualStatus || "") === "completed");
+                          const markedTasks = completedOnly.filter(t => typeof t.qualityMark === 'number');
                           const totalMarks = markedTasks.reduce((sum, t) => sum + (t.qualityMark || 0), 0);
                           const avgMark = markedTasks.length > 0 ? (totalMarks / markedTasks.length).toFixed(1) : 0;
                           
@@ -1869,7 +2230,7 @@ export default function AdminDashboard() {
                                   <div className="flex-1">
                                     <h3 className="text-xl font-bold text-gray-800">{memberData?.name || 'Member'}</h3>
                                     <div className="flex gap-4 mt-2 text-sm">
-                                      <p className="text-gray-600">Completed Tasks: <span className="font-semibold text-gray-800">{memberTasks.length}</span></p>
+                                      <p className="text-gray-600">Completed Tasks: <span className="font-semibold text-gray-800">{completedOnly.length}</span></p>
                                       <p className="text-gray-600">Marked Tasks: <span className="font-semibold text-gray-800">{markedTasks.length}</span></p>
                                       <p className="text-gray-600">Average Score: <span className="font-semibold text-gray-800">{avgMark}/100</span></p>
                                     </div>
@@ -1979,200 +2340,6 @@ export default function AdminDashboard() {
                   </div>
                 </div>
               )}
-
-              {/* Manager Panel - Behavior Marking */}
-              {showManagerPanel && (
-                <div className="fixed left-72 right-6 top-6 z-50 animate-slide-down max-h-[90vh] overflow-auto">
-                  <div className="bg-white p-6 rounded-2xl shadow-lg relative">
-                    <div className="absolute right-3 top-3 flex gap-2">
-                      <button onClick={closeManagerPanel} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
-                    </div>
-                    <h2 className="text-xl font-semibold mb-4">👨‍💼 Manager - Behavior Assessment</h2>
-                    
-                    {!selectedMemberForManager ? (
-                      <div>
-                        <div className="mb-4 p-4 bg-green-50 rounded-lg border border-green-200">
-                          <p className="text-sm text-green-800">
-                            <span className="font-semibold">Manager Section:</span> Track and evaluate employee behavior on a daily basis. Each member's score is normalized to 100 based on their average daily marks.
-                          </p>
-                        </div>
-                        
-                        <h3 className="text-lg font-bold mb-3">📊 Members Behavior Score (Out of 100)</h3>
-                        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                          {users.map((member) => {
-                            const userId = member.uid || member.id;
-                            const behaviorScore = calculateBehaviorScore(userId);
-                            const records = getMemberBehaviorRecords(userId);
-                            return (
-                              <div
-                                key={userId}
-                                onClick={() => setSelectedMemberForManager(userId)}
-                                className="border-2 rounded-lg p-4 cursor-pointer hover:bg-green-50 hover:border-green-400 transition-all duration-200 shadow-sm hover:shadow-md"
-                              >
-                                <div className="flex items-center justify-between mb-2">
-                                  <div className="flex-1">
-                                    <p className="font-semibold text-gray-800">{member.name || member.email}</p>
-                                    <p className="text-xs text-gray-500">Total Records: {records.length}</p>
-                                  </div>
-                                  <div className="text-right">
-                                    <div className="text-3xl font-bold text-green-600">{behaviorScore}</div>
-                                    <p className="text-xs text-gray-500">/ 100</p>
-                                  </div>
-                                </div>
-                                <div className="mt-2">
-                                  <div className="w-full bg-gray-200 rounded-full h-2">
-                                    <div 
-                                      className="bg-gradient-to-r from-green-500 to-emerald-600 h-2 rounded-full transition-all duration-500"
-                                      style={{ width: `${behaviorScore}%` }}
-                                    ></div>
-                                  </div>
-                                </div>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); setSelectedMemberForManager(userId); }}
-                                  className="mt-3 w-full text-xs text-green-700 hover:text-green-900 font-semibold bg-green-50 hover:bg-green-100 py-2 rounded"
-                                >
-                                  View & Mark Behavior →
-                                </button>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ) : (
-                      <div>
-                        {(() => {
-                          const member = users.find(u => (u.uid || u.id) === selectedMemberForManager);
-                          const behaviorScore = calculateBehaviorScore(selectedMemberForManager);
-                          const records = getMemberBehaviorRecords(selectedMemberForManager);
-                          
-                          return (
-                            <>
-                              <div className="mb-6 bg-gradient-to-r from-green-50 to-emerald-50 border-2 border-green-200 rounded-lg p-4">
-                                <div className="flex items-center justify-between">
-                                  <div className="flex-1">
-                                    <h3 className="text-xl font-bold text-gray-800">{member?.name || member?.email || 'Member'}</h3>
-                                    <div className="flex gap-4 mt-2 text-sm">
-                                      <p className="text-gray-600">Total Records: <span className="font-semibold text-gray-800">{records.length}</span></p>
-                                    </div>
-                                  </div>
-                                  <div className="text-right">
-                                    <p className="text-sm text-gray-600 mb-1">Behavior Score</p>
-                                    <div className="text-4xl font-bold text-green-600">{behaviorScore}</div>
-                                    <p className="text-sm text-gray-500">/ 100</p>
-                                  </div>
-                                </div>
-                                <div className="mt-3">
-                                  <div className="w-full bg-gray-200 rounded-full h-3">
-                                    <div 
-                                      className="bg-gradient-to-r from-green-500 to-emerald-600 h-3 rounded-full transition-all duration-500"
-                                      style={{ width: `${behaviorScore}%` }}
-                                    ></div>
-                                  </div>
-                                </div>
-                                <button 
-                                  onClick={() => setSelectedMemberForManager('')} 
-                                  className="mt-3 text-sm text-green-700 hover:text-green-900 font-semibold flex items-center gap-1"
-                                >
-                                  ← Back to Members List
-                                </button>
-                              </div>
-
-                              {/* Mark Behavior Form */}
-                              <div className="mb-6 p-4 bg-white border-2 border-green-300 rounded-lg">
-                                <h3 className="text-lg font-bold mb-3">📝 Mark Daily Behavior</h3>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                                  <div>
-                                    <label className="block text-sm font-semibold mb-1 text-gray-700">Select Date</label>
-                                    <input
-                                      type="date"
-                                      value={managerBehaviorDate}
-                                      onChange={(e) => setManagerBehaviorDate(e.target.value)}
-                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-400 focus:border-green-400"
-                                    />
-                                  </div>
-                                  <div>
-                                    <label className="block text-sm font-semibold mb-1 text-gray-700">Marks (0-100)</label>
-                                    <input
-                                      type="number"
-                                      min="0"
-                                      max="100"
-                                      value={managerBehaviorMarks}
-                                      onChange={(e) => setManagerBehaviorMarks(e.target.value)}
-                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-400 focus:border-green-400"
-                                      placeholder="Enter marks"
-                                    />
-                                  </div>
-                                </div>
-                                <div className="mb-4">
-                                  <label className="block text-sm font-semibold mb-1 text-gray-700">Status / Remarks (Optional)</label>
-                                  <textarea
-                                    value={managerBehaviorRemarks}
-                                    onChange={(e) => setManagerBehaviorRemarks(e.target.value)}
-                                    rows="3"
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-400 focus:border-green-400"
-                                    placeholder="Add any remarks about behavior, attendance, punctuality, attitude, etc."
-                                  />
-                                </div>
-                                <button
-                                  onClick={saveBehaviorMark}
-                                  disabled={savingBehaviorMark}
-                                  className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2.5 rounded-lg transition-colors duration-200 disabled:bg-gray-300 disabled:cursor-not-allowed"
-                                >
-                                  {savingBehaviorMark ? "Saving..." : "Save Behavior Mark"}
-                                </button>
-                              </div>
-
-                              {/* Behavior History */}
-                              <h3 className="text-lg font-bold mb-3">📜 Behavior History</h3>
-                              <div className="overflow-x-auto">
-                                <table className="min-w-full text-sm border rounded-lg">
-                                  <thead>
-                                    <tr className="bg-gradient-to-r from-green-100 to-emerald-100">
-                                      <th className="p-3 text-left font-semibold">Date</th>
-                                      <th className="p-3 text-left font-semibold">Marks</th>
-                                      <th className="p-3 text-left font-semibold">Remarks</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {records.map((record, idx) => (
-                                      <tr key={idx} className={`border-b hover:bg-gray-50 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
-                                        <td className="p-3 text-gray-800 font-medium">
-                                          {new Date(record.date).toLocaleDateString('en-US', { 
-                                            year: 'numeric', 
-                                            month: 'short', 
-                                            day: 'numeric' 
-                                          })}
-                                        </td>
-                                        <td className="p-3">
-                                          <span className={`inline-block px-3 py-1 rounded-full font-semibold ${
-                                            record.marks >= 80 ? 'bg-green-100 text-green-700' :
-                                            record.marks >= 60 ? 'bg-yellow-100 text-yellow-700' :
-                                            record.marks >= 40 ? 'bg-orange-100 text-orange-700' :
-                                            'bg-red-100 text-red-700'
-                                          }`}>
-                                            {record.marks}/100
-                                          </span>
-                                        </td>
-                                        <td className="p-3 text-gray-600">
-                                          {record.remarks || <span className="text-gray-400 italic">No remarks</span>}
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                                {records.length === 0 && (
-                                  <p className="p-6 text-center text-gray-500">No behavior records found for this member</p>
-                                )}
-                              </div>
-                            </>
-                          );
-                        })()}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
           {/* Bulk Tasks Preview / Confirm */}
           {showBulkPreview && bulkPreviewRows && (
             <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/50">
@@ -2624,7 +2791,7 @@ export default function AdminDashboard() {
           <h2 className="text-xl font-semibold mb-4">📊 Employee Performance Overview</h2>
           <div className="bg-gray-50 p-4 rounded-lg border mb-4">
           <h3 className="text-lg font-semibold mb-2">Evaluation</h3>
-          <div className="text-xs text-gray-500 mb-3">Grades: A (&gt;90), B (85-90), C (80-84), D (70-79), F (&lt;70)</div>
+          <div className="text-xs text-gray-500 mb-3">Grades: A (91-100), B (81-90), C (80 and below)</div>
 
             <div className="max-h-64 overflow-auto mb-2">
               <table className="min-w-full text-sm">
@@ -2633,23 +2800,19 @@ export default function AdminDashboard() {
                     <th className="p-3 text-left">Employee</th>
                     <th className="p-3 text-left">
                       <div>Task Closing</div>
-                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 40 weightage)</div>
+                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 50 weightage)</div>
                     </th>
                     <th className="p-3 text-left">
                       <div>Attendance</div>
-                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 10 weightage)</div>
+                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 15 weightage)</div>
                     </th>
                     <th className="p-3 text-left">
                       <div>Quality</div>
                       <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 20 weightage)</div>
                     </th>
                     <th className="p-3 text-left">
-                      <div>Manager</div>
-                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 20 weightage)</div>
-                    </th>
-                    <th className="p-3 text-left">
                       <div>KPI</div>
-                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 10 weightage)</div>
+                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 15 weightage)</div>
                     </th>
                     <th className="p-3 text-left">
                       <div>Total</div>
@@ -2657,14 +2820,14 @@ export default function AdminDashboard() {
                     </th>
                     <th className="p-3 text-left">
                       <div>Grade</div>
-                      <div className="text-[10px] font-normal normal-case text-gray-400">(with remarks)</div>
+                      <div className="text-[10px] font-normal normal-case text-gray-400">(new scale)</div>
                     </th>
                   </tr>
                 </thead>
                 <tbody>
                   {evaluation.length === 0 ? (
                     <tr>
-                      <td colSpan="8" className="p-3 text-gray-500 text-sm">No employees available yet.</td>
+                      <td colSpan="7" className="p-3 text-gray-500 text-sm">No employees available yet.</td>
                     </tr>
                   ) : (
                     evaluation.map((e) => (
@@ -2674,11 +2837,11 @@ export default function AdminDashboard() {
                           {e.email && <div className="text-xs text-gray-500">{e.email}</div>}
                         </td>
                         <td className="p-3 align-top">
-                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.taskClosing.weighted)} / 40</div>
+                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.taskClosing.weighted)} / 50</div>
                           <div className="text-xs text-gray-500">Avg {formatOneDecimalString(e.taskClosing.raw)}%</div>
                         </td>
                         <td className="p-3 align-top">
-                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.attendance.weighted)} / 10</div>
+                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.attendance.weighted)} / 15</div>
                           <div className="text-xs text-gray-500">Presence {formatOneDecimalString(e.attendance.percentage)}%</div>
                         </td>
                         <td className="p-3 align-top">
@@ -2686,11 +2849,7 @@ export default function AdminDashboard() {
                           <div className="text-xs text-gray-500">Avg {formatOneDecimalString(e.quality.raw)}%</div>
                         </td>
                         <td className="p-3 align-top">
-                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.manager.weighted)} / 20</div>
-                          <div className="text-xs text-gray-500">Avg {formatOneDecimalString(e.manager.raw)}%</div>
-                        </td>
-                        <td className="p-3 align-top">
-                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.kpi.weighted)} / 10</div>
+                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.kpi.weighted)} / 15</div>
                           <div className="text-xs text-gray-500">Avg {formatOneDecimalString(e.kpi.raw)}%</div>
                         </td>
                         <td className="p-3 align-top">
@@ -2698,7 +2857,6 @@ export default function AdminDashboard() {
                         </td>
                         <td className="p-3 align-top">
                           <div className={`text-sm font-semibold ${gradeColorClass(e.grade)}`}>{e.grade}</div>
-                          <div className="text-xs text-gray-500">{e.remarks}</div>
                         </td>
                       </tr>
                     ))
@@ -2707,7 +2865,7 @@ export default function AdminDashboard() {
               </table>
             </div>
 
-            <div className="text-xs text-gray-500">Weights: Task Closing 40, Attendance 10, Quality 20, Manager 20, KPI 10.</div>
+            <div className="text-xs text-gray-500">Weights: Task Closing 50, Attendance 15, Quality 20, KPI 15.</div>
         </div>
 
         <div className="mt-2">
@@ -2904,52 +3062,100 @@ export default function AdminDashboard() {
 
             return (
               <div className="divide-y">
-                {filtered.map((task) => (
-                  <div key={task.id} className="flex flex-col md:flex-row md:justify-between items-start md:items-center py-4 gap-4">
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium text-gray-800">
-                        {task.title}
-                        {task.priority && (
-                          <span className={`ml-2 text-xs font-semibold inline-block px-2 py-1 rounded ${task.priority === "high" ? "bg-red-100 text-red-700" : task.priority === "medium" ? "bg-yellow-100 text-yellow-700" : "bg-green-100 text-green-700"}`}>
-                            {task.priority}
-                          </span>
-                        )}
-                      </p>
-                      <p className="text-sm text-gray-500 mt-1">Assigned to: {task.assignedName ? `${task.assignedName} (${task.assignedEmail})` : task.assignedEmail || "Unknown"}</p>
-                      <p className="text-sm text-gray-500">Duration: {formatDate(task.startDate)} — {formatDate(task.endDate)}</p>
-                    </div>
+                {filtered.map((task) => {
+                  const normalizedStatus = canonicalStatus(task.status);
+                  const draftQualityValue = Object.prototype.hasOwnProperty.call(qualityMarksDraft, task.id)
+                    ? qualityMarksDraft[task.id]
+                    : (typeof task.qualityMark === "number" ? task.qualityMark : "");
+                  const savedQualityValue = typeof task.qualityMark === "number" ? task.qualityMark : null;
+                  const disableQuickSave = draftQualityValue === "" || draftQualityValue === null || draftQualityValue === undefined || savingQualityMarkTaskId === task.id;
 
-                    <div className="w-full md:w-1/3 flex flex-col items-center">
-                      <div className="text-center mb-2">
-                        <div className="text-sm font-semibold">Actual Status</div>
-                      </div>
-                      <textarea value={actualStatusMap[task.id] ?? ""} onChange={(e) => handleActualChange(task.id, e.target.value)} className="w-full md:w-11/12 border rounded p-2 text-sm min-h-[60px] resize-y" placeholder="Write actual status here..." />
-                      <div className="mt-2 flex gap-2">
-                        <button onClick={() => saveActualStatus(task.id)} className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1 rounded text-sm">Save</button>
-                        {showDeleteTasks && <button onClick={() => deleteTask(task.id, task.title)} className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm">Delete</button>}
-                      </div>
-                    </div>
+                  return (
+                    <div key={task.id} className="py-4">
+                      <div className="flex flex-col md:flex-row md:justify-between md:items-center items-start gap-4">
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium text-gray-800">
+                            {task.title}
+                            {task.priority && (
+                              <span className={`ml-2 text-xs font-semibold inline-block px-2 py-1 rounded ${task.priority === "high" ? "bg-red-100 text-red-700" : task.priority === "medium" ? "bg-yellow-100 text-yellow-700" : "bg-green-100 text-green-700"}`}>
+                                {task.priority}
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-sm text-gray-500 mt-1">Assigned to: {task.assignedName ? `${task.assignedName} (${task.assignedEmail})` : task.assignedEmail || "Unknown"}</p>
+                          <p className="text-sm text-gray-500">Duration: {formatDate(task.startDate)} — {formatDate(task.endDate)}</p>
+                        </div>
 
-                    <div className="flex-shrink-0 flex items-center gap-2">
-                      <div className="relative flex items-center">
-                        <select value={canonicalStatus(task.status)} onChange={(e) => updateTaskStatus(task.id, e.target.value)} className={`border p-2 rounded text-sm ${statusClass(task.status)}`}>
-                          <option value="completed">completed</option>
-                          <option value="in process">in process</option>
-                          <option value="delayed">delayed</option>
-                          <option value="cancelled">cancelled</option>
-                        </select>
-                        {statusReactions[task.id] && (
-                          <span aria-hidden className="ml-3 -mr-2">
-                            {statusReactions[task.id] === 'completed' && <span className="text-2xl animate-bounce">👏</span>}
-                            {statusReactions[task.id] === 'cancelled' && <span className="text-2xl animate-pulse">😢</span>}
-                            {statusReactions[task.id] === 'delayed' && <span className="text-2xl animate-pulse text-red-600">😭</span>}
-                            {statusReactions[task.id] === 'in process' && <span className="text-2xl animate-bounce text-yellow-500">🚀</span>}
-                          </span>
-                        )}
+                        <div className="w-full md:w-1/3 flex flex-col items-center">
+                          <div className="text-center mb-2">
+                            <div className="text-sm font-semibold">Actual Status</div>
+                          </div>
+                          <textarea value={actualStatusMap[task.id] ?? ""} onChange={(e) => handleActualChange(task.id, e.target.value)} className="w-full md:w-11/12 border rounded p-2 text-sm min-h-[60px] resize-y" placeholder="Write actual status here..." />
+                          <div className="mt-2 flex gap-2">
+                            <button onClick={() => saveActualStatus(task.id)} className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1 rounded text-sm">Save</button>
+                            {showDeleteTasks && <button onClick={() => deleteTask(task.id, task.title)} className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm">Delete</button>}
+                          </div>
+                        </div>
+
+                        <div className="flex-shrink-0 flex items-center gap-2">
+                          <div className="relative flex items-center">
+                            <select value={normalizedStatus} onChange={(e) => updateTaskStatus(task.id, e.target.value)} className={`border p-2 rounded text-sm ${statusClass(task.status)}`}>
+                              <option value="completed">completed</option>
+                              <option value="in process">in process</option>
+                              <option value="delayed">delayed</option>
+                              <option value="cancelled">cancelled</option>
+                            </select>
+                            {statusReactions[task.id] && (
+                              <span aria-hidden className="ml-3 -mr-2">
+                                {statusReactions[task.id] === 'completed' && <span className="text-2xl animate-bounce">👏</span>}
+                                {statusReactions[task.id] === 'cancelled' && <span className="text-2xl animate-pulse">😢</span>}
+                                {statusReactions[task.id] === 'delayed' && <span className="text-2xl animate-pulse text-red-600">😭</span>}
+                                {statusReactions[task.id] === 'in process' && <span className="text-2xl animate-bounce text-yellow-500">🚀</span>}
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </div>
+
+                      {normalizedStatus === "completed" && (
+                        <div className="w-full mt-3 bg-indigo-50 border border-indigo-200 rounded-lg p-4">
+                          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                            <div className="flex-1">
+                              <p className="text-sm font-semibold text-indigo-900">Quality of Work Shortcut</p>
+                              <p className="text-xs text-indigo-700 mt-1">
+                                Record the quality score here to update the Quality of Work evaluation without leaving the All Tasks view.
+                              </p>
+                              {savedQualityValue !== null && (
+                                <p className="text-xs text-indigo-700 mt-1">Saved score: {savedQualityValue}/100</p>
+                              )}
+                              {savedQualityValue === null && (
+                                <span className="inline-flex items-center text-xs text-white bg-indigo-500 px-2 py-0.5 rounded-full mt-2">Pending quality score</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="number"
+                                min="0"
+                                max="100"
+                                value={draftQualityValue === undefined || draftQualityValue === null ? "" : draftQualityValue}
+                                onChange={(e) => setQualityMarksDraft((prev) => ({ ...prev, [task.id]: e.target.value }))}
+                                className="w-24 border border-indigo-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                                placeholder="0-100"
+                              />
+                              <button
+                                onClick={() => saveQualityMark(task.id, draftQualityValue)}
+                                disabled={disableQuickSave}
+                                className={`px-4 py-2 text-sm font-semibold rounded-lg ${disableQuickSave ? "bg-gray-300 text-gray-600 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-700 text-white"}`}
+                              >
+                                {savingQualityMarkTaskId === task.id ? "Saving..." : "Save score"}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             );
           })()
@@ -3047,9 +3253,8 @@ export default function AdminDashboard() {
 
         <div className="text-xs text-gray-500 mt-3">Notes: Portal reminders create a notification document in Firestore (collection "notifications") — employees' portal should listen to that collection to show pop-up reminders. Reminder compose opens Outlook web compose in a new tab with a prefilled message.</div>
       </div>
-      </main>
-    </div>
+    </main>
   </div>
+</div>
   );
 }
-//working code (fine tunned )

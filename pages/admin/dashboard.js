@@ -3,7 +3,7 @@ import { tasksService, usersService, activityLogsService, kpiService } from "../
 import { useAuthContext } from "../../context/AuthContext";
 
 export default function AdminDashboard() {
-  const { user, isAdmin } = useAuthContext();
+  const { user, isAdmin, loading: authLoading } = useAuthContext();
   
   const [stats, setStats] = useState({
     totalTasks: 0,
@@ -29,7 +29,8 @@ export default function AdminDashboard() {
   const [kpiData, setKpiData] = useState({});
   const [selectedKPIMonth, setSelectedKPIMonth] = useState("");
   const [selectedKPIYear, setSelectedKPIYear] = useState("2024");
-  const [kpiScores, setKpiScores] = useState({});
+  const [selectedKPIUserId, setSelectedKPIUserId] = useState("");
+  const [kpiScoreInput, setKpiScoreInput] = useState("");
   const [savingKPI, setSavingKPI] = useState(false);
   const kpiSectionRef = useRef(null);
   
@@ -53,10 +54,22 @@ export default function AdminDashboard() {
     phone: "",
   });
 
-  // Fetch dashboard data
+  // Fetch dashboard data once authentication state is ready
   useEffect(() => {
+    if (authLoading) return;
+    if (!user) {
+      setLoading(false);
+      setError("Please sign in to view the admin dashboard.");
+      return;
+    }
+
+    if (!isAdmin) {
+      setLoading(false);
+      setError("Admin access required to view this dashboard.");
+      return;
+    }
     fetchDashboardData();
-  }, []);
+  }, [authLoading, user, isAdmin]);
 
   useEffect(() => {
     if (showKPI) {
@@ -73,6 +86,10 @@ export default function AdminDashboard() {
     try {
       setLoading(true);
       setError(null);
+
+      if (!user) {
+        throw new Error("Not authenticated");
+      }
 
       const [tasksData, usersData, logsData] = await Promise.all([
         tasksService.getAllTasks(),
@@ -93,9 +110,12 @@ export default function AdminDashboard() {
         completedTasks: completed,
         pendingTasks: pending,
       });
-      // Keep completed tasks list in sync if feature is open
+      // Keep task closing list in sync if feature is open (completed + delayed)
       if (showTaskClosing) {
-        setCompletedTasks(tasksData.filter((t) => t.status === "completed"));
+        const relevantTasks = tasksData.filter(t => 
+          t.status === "completed" || t.status === "delayed"
+        );
+        setCompletedTasks(relevantTasks);
       }
     } catch (err) {
       console.error("Dashboard error:", err);
@@ -106,14 +126,27 @@ export default function AdminDashboard() {
   };
 
   const openTaskClosingView = async () => {
+    if (!user) {
+      setError("Please sign in to manage task completion.");
+      return;
+    }
+
+    if (!isAdmin) {
+      setError("Admin access required to manage task completion.");
+      return;
+    }
     setShowTaskClosing(true);
     setShowKPI(false);
     setActiveTab("overview"); // keep existing tabs untouched
     try {
-      const completed = await tasksService.getTasksByStatus("completed");
-      setCompletedTasks(completed);
+      // Fetch both completed and delayed tasks from all tasks
+      const allTasks = await tasksService.getAllTasks();
+      const relevantTasks = allTasks.filter(t => 
+        t.status === "completed" || t.status === "delayed"
+      );
+      setCompletedTasks(relevantTasks);
     } catch (err) {
-      setError(err.message || "Failed to load completed tasks");
+      setError(err.message || "Failed to load tasks");
     }
   };
 
@@ -125,22 +158,39 @@ export default function AdminDashboard() {
 
   // KPI Functions
   const openKPIView = () => {
+    if (!user) {
+      setError("Please sign in to manage KPI scores.");
+      return;
+    }
+
+    if (!isAdmin) {
+      setError("Admin access required to manage KPI scores.");
+      return;
+    }
     setShowTaskClosing(false);
     setShowKPI(true);
     setActiveTab("overview");
+    if (!selectedKPIUserId && employeeMembers.length > 0) {
+      setSelectedKPIUserId(employeeMembers[0].uid || employeeMembers[0].id);
+    }
   };
 
   const closeKPIView = () => {
     setShowKPI(false);
     setSelectedKPIMonth("");
-    setKpiScores({});
+    setSelectedKPIUserId("");
+    setKpiScoreInput("");
   };
 
   const loadKPIData = async () => {
     try {
+      if (!user || !isAdmin) {
+        throw new Error("Admin access required to load KPI data");
+      }
       setError(null);
       const data = await kpiService.getAllScores();
       setKpiData(data);
+      setKpiScoreInput("");
     } catch (err) {
       console.error("Error loading KPI data:", err);
       setError(err.message || "Failed to load KPI data");
@@ -148,57 +198,57 @@ export default function AdminDashboard() {
   };
 
   const saveKPIScores = async () => {
+    if (!user || !isAdmin) {
+      alert("Admin access required to save KPI scores");
+      return;
+    }
+
+    if (!selectedKPIUserId) {
+      alert("Please select an employee to record a KPI score");
+      return;
+    }
+
     if (!selectedKPIMonth || !selectedKPIYear) {
       alert("Please select month and year");
       return;
     }
 
+    const scoreNum = Number(kpiScoreInput);
+    if (Number.isNaN(scoreNum) || scoreNum < 0 || scoreNum > 100) {
+      alert("Please enter a valid score between 0 and 100");
+      return;
+    }
+
+    const selectedMember = employeeMembers.find(
+      (member) => (member.uid || member.id) === selectedKPIUserId
+    );
+    const memberName = selectedMember
+      ? (selectedMember.displayName || selectedMember.name || selectedMember.email)
+      : memberNameById(selectedKPIUserId);
+
+    const scoreKey = `${selectedKPIUserId}_${selectedKPIYear}_${selectedKPIMonth}`;
+    if (kpiData[scoreKey]) {
+      alert(`${memberName} already has a score recorded for ${selectedKPIMonth} ${selectedKPIYear}`);
+      return;
+    }
+
     setSavingKPI(true);
     try {
-      const results = {
-        saved: [],
-        skipped: [],
-      };
-
-      for (const [userId, score] of Object.entries(kpiScores)) {
-        if (score === undefined || score === null || score === "") continue;
-
-        const scoreNum = Number(score);
-        const memberName = memberNameById(userId);
-
-        if (Number.isNaN(scoreNum) || scoreNum < 0 || scoreNum > 100) {
-          results.skipped.push(`${memberName}: invalid score`);
-          continue;
-        }
-
-        try {
-          await kpiService.createMonthlyScore({
-            userId,
-            userName: memberName,
-            month: selectedKPIMonth,
-            year: selectedKPIYear,
-            score: scoreNum,
-            addedBy: user?.uid || "admin",
-          });
-          results.saved.push(memberName);
-        } catch (innerErr) {
-          results.skipped.push(innerErr.message || `${memberName}: already recorded`);
-        }
-      }
-
-      if (results.saved.length) {
-        alert(`Saved KPI score(s) for: ${results.saved.join(", ")}`);
-      }
-
-      if (results.skipped.length) {
-        alert(`Skipped entries: ${results.skipped.join(" | ")}`);
-      }
+      await kpiService.createMonthlyScore({
+        userId: selectedKPIUserId,
+        userName: memberName,
+        month: selectedKPIMonth,
+        year: selectedKPIYear,
+        score: scoreNum,
+        addedBy: user?.uid || "admin",
+      });
 
       await loadKPIData();
-      setKpiScores({});
+      setKpiScoreInput("");
+      alert(`Saved KPI score for ${memberName} (${selectedKPIMonth} ${selectedKPIYear})`);
     } catch (err) {
       console.error("Error saving KPI:", err);
-      alert("Failed to save KPI scores: " + err.message);
+      alert("Failed to save KPI score: " + err.message);
     } finally {
       setSavingKPI(false);
     }
@@ -230,7 +280,44 @@ export default function AdminDashboard() {
     (member.role || "employee").toLowerCase() === "employee"
   ));
 
+  const monthOrder = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+  ];
+
+  const monthToIndex = (monthName) => {
+    const idx = monthOrder.indexOf(monthName);
+    return idx === -1 ? 0 : idx;
+  };
+
+  const selectedKPIMember = selectedKPIUserId
+    ? employeeMembers.find((member) => (member.uid || member.id) === selectedKPIUserId)
+    : null;
+
+  const selectedMemberKpiHistory = selectedKPIUserId
+    ? Object.values(kpiData || {})
+        .filter((entry) => entry.userId === selectedKPIUserId)
+        .sort((a, b) => {
+          const yearDiff = (b.year || 0) - (a.year || 0);
+          if (yearDiff !== 0) return yearDiff;
+          return monthToIndex(b.month) - monthToIndex(a.month);
+        })
+    : [];
+
+  const pendingKPIScoreKey = (selectedKPIUserId && selectedKPIMonth && selectedKPIYear)
+    ? `${selectedKPIUserId}_${selectedKPIYear}_${selectedKPIMonth}`
+    : null;
+
+  const pendingKPIScoreExists = pendingKPIScoreKey ? kpiData[pendingKPIScoreKey] : null;
+
+  const selectedMemberAverage = selectedKPIMember ? getUserKPITotal(selectedKPIUserId) : 0;
+
   const saveTaskMark = async (taskId, markValue) => {
+    if (!user || !isAdmin) {
+      alert("Admin access required to update task marks");
+      return;
+    }
+
     const mark = Number(markValue);
     if (Number.isNaN(mark) || mark < 0 || mark > 100) {
       alert("Please enter a valid mark between 0 and 100");
@@ -260,15 +347,28 @@ export default function AdminDashboard() {
     const grouped = {};
     completedTasks.forEach((t) => {
       const uid = t.assignedTo || "unassigned";
-      if (!grouped[uid]) grouped[uid] = { uid, count: 0, marks: [] };
-      grouped[uid].count += 1;
+      if (!grouped[uid]) grouped[uid] = { uid, completedCount: 0, delayedCount: 0, marks: [] };
+      
+      // Count completed and delayed tasks separately
+      if (t.status === "completed") {
+        grouped[uid].completedCount += 1;
+      } else if (t.status === "delayed") {
+        grouped[uid].delayedCount += 1;
+      }
+      
       if (typeof t.closingMark === "number") grouped[uid].marks.push(t.closingMark);
     });
     return Object.values(grouped).map((g) => {
-      const sum = g.marks.reduce((a, b) => a + b, 0);
-      const denom = g.marks.length * 100;
-      const totalScaled = denom > 0 ? Math.round((sum / denom) * 100) : 0; // out of 100
-      return { uid: g.uid, totalOutOf100: totalScaled, tasksCompleted: g.count };
+      const totalTasks = g.completedCount + g.delayedCount;
+      // Percentage = (completed / total) * 100
+      const percentage = totalTasks > 0 ? Math.round((g.completedCount / totalTasks) * 100) : 0;
+      return { 
+        uid: g.uid, 
+        totalOutOf100: percentage, 
+        tasksCompleted: g.completedCount,
+        tasksDelayed: g.delayedCount,
+        totalTasks: totalTasks
+      };
     });
   };
 
@@ -403,7 +503,7 @@ export default function AdminDashboard() {
                   onClick={openTaskClosingView}
                   className="w-full text-left px-4 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium transition border border-indigo-200"
                 >
-                  📋 Task closing
+                  📋 Task completion tracking
                 </button>
                 <button className="w-full text-left px-4 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-medium transition border border-indigo-200">
                   📅 Attendence
@@ -477,7 +577,7 @@ export default function AdminDashboard() {
         {showTaskClosing && (
           <div className="bg-white rounded-lg shadow p-6 mb-8">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold">Task Closing</h2>
+              <h2 className="text-xl font-bold">📊 Task Completion Tracking (Completed & Delayed)</h2>
               <button onClick={closeTaskClosingView} className="text-sm text-gray-600 hover:text-gray-900">Close ✕</button>
             </div>
             <div className="grid gap-4 md:grid-cols-3 mb-6">
@@ -497,22 +597,34 @@ export default function AdminDashboard() {
                 </select>
               </div>
               <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3">
-                <p className="text-sm text-indigo-700">Each task is marked out of 100. Member total is the sum of their task marks, normalized back to 100.</p>
+                <p className="text-sm text-indigo-700">
+                  <strong>Task Completion Tracking:</strong> The system tracks both completed and delayed tasks for each person. 
+                  The percentage shown is calculated as: <strong>(Completed Tasks / Total Tasks) × 100</strong>, where Total Tasks = Completed + Delayed tasks.
+                  Each task can also be marked out of 100 for quality assessment.
+                </p>
               </div>
             </div>
 
             {!selectedMemberId && (
               <div className="mb-6">
-                <h3 className="text-lg font-bold mb-2">Members — Total (out of 100)</h3>
+                <h3 className="text-lg font-bold mb-2">Members — Task Completion Percentage</h3>
                 <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   {memberSummaries().map((m) => (
-                    <div key={m.uid} className="border rounded-lg p-4">
-                      <div className="flex items-center justify-between">
+                    <div key={m.uid} className="border rounded-lg p-4 hover:shadow-lg transition-shadow">
+                      <div className="flex items-center justify-between mb-2">
                         <div>
                           <p className="font-semibold">{memberNameById(m.uid)}</p>
-                          <p className="text-xs text-gray-500">Completed: {m.tasksCompleted}</p>
+                          <p className="text-xs text-green-600">Completed: {m.tasksCompleted}</p>
+                          <p className="text-xs text-red-600">Delayed: {m.tasksDelayed}</p>
+                          <p className="text-xs text-gray-600 font-medium">Total: {m.totalTasks}</p>
                         </div>
-                        <div className="text-2xl font-bold text-indigo-600">{m.totalOutOf100}</div>
+                        <div className="text-2xl font-bold text-indigo-600">{m.totalOutOf100}%</div>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
+                        <div 
+                          className="bg-indigo-600 h-2 rounded-full transition-all duration-300" 
+                          style={{ width: `${m.totalOutOf100}%` }}
+                        ></div>
                       </div>
                     </div>
                   ))}
@@ -539,7 +651,13 @@ export default function AdminDashboard() {
                         <td className="px-6 py-3">{task.title}</td>
                         <td className="px-6 py-3 text-sm">{task.assignedToName || memberNameById(task.assignedTo)}</td>
                         <td className="px-6 py-3">
-                          <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded">completed</span>
+                          <span className={`text-xs px-2 py-1 rounded ${
+                            task.status === "completed" 
+                              ? "bg-green-100 text-green-700" 
+                              : "bg-red-100 text-red-700"
+                          }`}>
+                            {task.status}
+                          </span>
                         </td>
                         <td className="px-6 py-3">
                           <input
@@ -566,7 +684,7 @@ export default function AdminDashboard() {
                 </tbody>
               </table>
               {completedTasks.filter((t) => !selectedMemberId || (t.assignedTo === selectedMemberId)).length === 0 && (
-                <p className="p-6 text-center text-gray-500">No completed tasks for this selection</p>
+                <p className="p-6 text-center text-gray-500">No completed or delayed tasks for this selection</p>
               )}
             </div>
           </div>
@@ -587,9 +705,9 @@ export default function AdminDashboard() {
               </p>
             </div>
 
-            {/* Member List with Total KPI Scores */}
             <div className="mb-6">
-              <h3 className="text-lg font-bold mb-3">Employee KPI Scores (Average out of 100)</h3>
+              <h3 className="text-lg font-bold mb-2">Select Employee</h3>
+              <p className="text-sm text-gray-500 mb-4">Choose a team member to record their monthly KPI score.</p>
               <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {employeeMembers.length === 0 ? (
                   <div className="col-span-full text-sm text-gray-500">
@@ -597,117 +715,155 @@ export default function AdminDashboard() {
                   </div>
                 ) : (
                   employeeMembers.map((member) => {
-                    const total = getUserKPITotal(member.uid || member.id);
-                    const monthsCount = Object.values(kpiData).filter((d) => d.userId === (member.uid || member.id)).length;
+                    const userId = member.uid || member.id;
+                    const monthsCount = Object.values(kpiData || {}).filter((entry) => entry.userId === userId).length;
+                    const average = getUserKPITotal(userId);
+                    const isSelected = selectedKPIUserId === userId;
+
                     return (
-                      <div key={member.uid || member.id} className="border rounded-lg p-4 bg-gray-50">
-                        <div className="flex items-center justify-between mb-2">
-                          <div>
-                            <p className="font-semibold text-gray-800">{member.displayName || member.name || member.email}</p>
-                            <p className="text-xs text-gray-500">Months Recorded: {monthsCount}</p>
-                          </div>
-                          <div className="text-2xl font-bold text-blue-600">{total}</div>
+                      <button
+                        key={userId}
+                        type="button"
+                        onClick={() => {
+                          setSelectedKPIUserId(userId);
+                          setSelectedKPIMonth("");
+                          setKpiScoreInput("");
+                        }}
+                        className={`border rounded-lg p-4 text-left transition shadow-sm ${
+                          isSelected
+                            ? "border-blue-500 bg-blue-50 shadow-md"
+                            : "bg-gray-50 hover:bg-blue-50 hover:border-blue-300"
+                        }`}
+                      >
+                        <p className="font-semibold text-gray-800">{member.displayName || member.name || member.email}</p>
+                        <p className="text-xs text-gray-500">{member.department || "No department set"}</p>
+                        <div className="flex items-center justify-between mt-3 text-sm">
+                          <span className="text-gray-600">Avg Score</span>
+                          <span className="font-semibold text-blue-600">{average}</span>
                         </div>
-                      </div>
+                        <div className="flex items-center justify-between text-xs text-gray-500 mt-1">
+                          <span>Months Recorded</span>
+                          <span>{monthsCount}</span>
+                        </div>
+                        {isSelected && (
+                          <div className="mt-2 text-xs font-semibold text-blue-600">Selected</div>
+                        )}
+                      </button>
                     );
                   })
                 )}
               </div>
             </div>
 
-            {/* Add Monthly Scores */}
             <div className="border-t pt-6">
-              <h3 className="text-lg font-bold mb-4">Add Monthly KPI Scores</h3>
-              
-              <div className="grid grid-cols-2 gap-4 mb-6">
-                <div>
-                  <label className="block text-sm font-semibold mb-2">Select Month</label>
-                  <select
-                    value={selectedKPIMonth}
-                    onChange={(e) => setSelectedKPIMonth(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                  >
-                    <option value="">-- Select Month --</option>
-                    {getMonthsList().map((month) => (
-                      <option key={month} value={month}>
-                        {month}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold mb-2">Select Year</label>
-                  <select
-                    value={selectedKPIYear}
-                    onChange={(e) => setSelectedKPIYear(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                  >
-                    <option value="2024">2024</option>
-                    <option value="2025">2025</option>
-                    <option value="2026">2026</option>
-                  </select>
-                </div>
-              </div>
+              <h3 className="text-lg font-bold mb-4">Monthly KPI Entry</h3>
+              {!selectedKPIMember ? (
+                <p className="text-sm text-gray-500">Select an employee above to record a KPI score.</p>
+              ) : (
+                <div className="grid lg:grid-cols-2 gap-6">
+                  <div className="space-y-4">
+                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                      <h4 className="text-md font-semibold text-gray-800">{selectedKPIMember.displayName || selectedKPIMember.name || selectedKPIMember.email}</h4>
+                      <p className="text-xs text-gray-500">
+                        Overall average: <span className="font-semibold text-blue-600">{selectedMemberAverage}</span>
+                      </p>
+                      <p className="text-xs text-gray-500 mt-1">
+                        Recorded months: <span className="font-semibold text-gray-700">{selectedMemberKpiHistory.length}</span>
+                      </p>
+                    </div>
 
-              {selectedKPIMonth && (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm border">
-                    <thead className="bg-gray-100 border-b">
-                      <tr>
-                        <th className="px-6 py-3 text-left font-semibold">Employee Name</th>
-                        <th className="px-6 py-3 text-left font-semibold">Department</th>
-                        <th className="px-6 py-3 text-left font-semibold">Score (0-100)</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {employeeMembers.length === 0 ? (
-                        <tr>
-                          <td colSpan={3} className="px-6 py-4 text-center text-sm text-gray-500">
-                            No employees available. Add employees first to record KPI scores.
-                          </td>
-                        </tr>
-                      ) : (
-                        employeeMembers.map((member) => {
-                          const userId = member.uid || member.id;
-                          const existingScoreKey = `${userId}_${selectedKPIYear}_${selectedKPIMonth}`;
-                          const hasExistingScore = kpiData[existingScoreKey];
-                          
-                          return (
-                            <tr key={userId} className="border-b hover:bg-gray-50">
-                              <td className="px-6 py-3 font-semibold">{member.displayName || member.name || member.email}</td>
-                              <td className="px-6 py-3 text-gray-600">{member.department || "-"}</td>
-                              <td className="px-6 py-3">
-                                {hasExistingScore ? (
-                                  <span className="text-green-600 font-semibold">
-                                    Already added: {hasExistingScore.score}
-                                  </span>
-                                ) : (
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    max="100"
-                                    value={kpiScores[userId] || ""}
-                                    onChange={(e) => setKpiScores((prev) => ({ ...prev, [userId]: e.target.value }))}
-                                    className="w-24 px-3 py-2 border border-gray-300 rounded-lg"
-                                    placeholder="0-100"
-                                  />
-                                )}
-                              </td>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div className="md:col-span-1">
+                        <label className="block text-sm font-semibold mb-2">Month</label>
+                        <select
+                          value={selectedKPIMonth}
+                          onChange={(e) => {
+                            setSelectedKPIMonth(e.target.value);
+                          }}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                        >
+                          <option value="">-- Select Month --</option>
+                          {getMonthsList().map((month) => (
+                            <option key={month} value={month}>
+                              {month}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="md:col-span-1">
+                        <label className="block text-sm font-semibold mb-2">Year</label>
+                        <select
+                          value={selectedKPIYear}
+                          onChange={(e) => setSelectedKPIYear(e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                        >
+                          <option value="2024">2024</option>
+                          <option value="2025">2025</option>
+                          <option value="2026">2026</option>
+                        </select>
+                      </div>
+                      <div className="md:col-span-1">
+                        <label className="block text-sm font-semibold mb-2">Score (0-100)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={kpiScoreInput}
+                          onChange={(e) => setKpiScoreInput(e.target.value)}
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg"
+                          placeholder="0-100"
+                        />
+                      </div>
+                    </div>
+
+                    {pendingKPIScoreExists && (
+                      <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-3">
+                        A score is already recorded for {selectedKPIMonth} {selectedKPIYear}. Please choose another month or update in Firestore directly if changes are required.
+                      </div>
+                    )}
+
+                    <div className="flex justify-end">
+                      <button
+                        onClick={saveKPIScores}
+                        disabled={
+                          savingKPI ||
+                          !selectedKPIMonth ||
+                          !kpiScoreInput ||
+                          !!pendingKPIScoreExists
+                        }
+                        className="bg-blue-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                      >
+                        {savingKPI ? "Saving..." : "Save KPI Score"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                    <h4 className="text-md font-semibold mb-3">Recorded Scores</h4>
+                    {selectedMemberKpiHistory.length === 0 ? (
+                      <p className="text-sm text-gray-500">No scores recorded yet for this employee.</p>
+                    ) : (
+                      <div className="max-h-64 overflow-auto">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-left text-xs uppercase text-gray-500">
+                              <th className="py-2 pr-3">Month</th>
+                              <th className="py-2 pr-3">Score</th>
+                              <th className="py-2">Weight (10%)</th>
                             </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                  
-                  <div className="mt-6 flex justify-end">
-                    <button
-                      onClick={saveKPIScores}
-                      disabled={savingKPI || Object.keys(kpiScores).length === 0}
-                      className="bg-blue-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
-                    >
-                      {savingKPI ? "Saving..." : "Save KPI Scores"}
-                    </button>
+                          </thead>
+                          <tbody>
+                            {selectedMemberKpiHistory.map((entry) => (
+                              <tr key={entry.id} className="border-t text-gray-700">
+                                <td className="py-2 pr-3">{entry.month} {entry.year}</td>
+                                <td className="py-2 pr-3 font-semibold">{entry.score}</td>
+                                <td className="py-2">{(((entry.score || 0) / 100) * 10).toFixed(1)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
