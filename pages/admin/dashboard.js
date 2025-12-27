@@ -214,8 +214,8 @@ export default function AdminDashboard() {
     }
 
     const scoreNum = Number(kpiScoreInput);
-    if (Number.isNaN(scoreNum) || scoreNum < 0 || scoreNum > 100) {
-      alert("Please enter a valid score between 0 and 100");
+    if (Number.isNaN(scoreNum) || scoreNum < 0) {
+      alert("Please enter a valid KPI score of 0 or higher");
       return;
     }
 
@@ -699,7 +699,7 @@ export default function AdminDashboard() {
             
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
               <p className="text-sm text-blue-700">
-                <strong>Note:</strong> Add KPI scores for each employee on a monthly basis. Each score is out of 100. 
+                <strong>Note:</strong> Add KPI scores for each employee on a monthly basis. Scores start at 0 and can exceed 100 when bonuses apply.
                 If an employee has multiple months of scores, the average will be displayed (normalized to 100).
                 Scores can only be added once per month per employee.
               </p>
@@ -803,15 +803,14 @@ export default function AdminDashboard() {
                         </select>
                       </div>
                       <div className="md:col-span-1">
-                        <label className="block text-sm font-semibold mb-2">Score (0-100)</label>
+                        <label className="block text-sm font-semibold mb-2">Score (0 or higher)</label>
                         <input
                           type="number"
                           min="0"
-                          max="100"
                           value={kpiScoreInput}
                           onChange={(e) => setKpiScoreInput(e.target.value)}
                           className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                          placeholder="0-100"
+                          placeholder="e.g. 120"
                         />
                       </div>
                     </div>

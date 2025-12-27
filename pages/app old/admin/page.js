@@ -88,6 +88,51 @@ const ATTENDANCE_STATUS_CONFIG = {
 
 const ATTENDANCE_STATUS_ORDER = ["present", "outdoor", "shortLeave", "absent", "off"];
 
+const INLINE_STATUS_OPTIONS = ["pending", "in process", "completed", "delayed", "cancelled"];
+const INLINE_PRIORITY_OPTIONS = ["high", "medium", "low"];
+
+const createInlineRow = () => ({
+  id: `inline-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+  title: "",
+  startDate: "",
+  endDate: "",
+  status: "pending",
+  priority: "medium",
+});
+
+const buildInitialInlineRows = () => Array.from({ length: 5 }, () => createInlineRow());
+
+const normalizeDateInputString = (value) => {
+  if (!value) return "";
+  const trimmed = value.toString().trim();
+  if (!trimmed) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const sanitizeInlineStatus = (value) => {
+  if (!value) return "pending";
+  const normalized = value.toString().trim().toLowerCase();
+  if (INLINE_STATUS_OPTIONS.includes(normalized)) return normalized;
+  if (normalized.includes("complete")) return "completed";
+  if (normalized.includes("delay")) return "delayed";
+  if (normalized.includes("cancel")) return "cancelled";
+  if (normalized.includes("process")) return "in process";
+  return "pending";
+};
+
+const sanitizeInlinePriority = (value) => {
+  if (!value) return "medium";
+  const normalized = value.toString().trim().toLowerCase();
+  if (INLINE_PRIORITY_OPTIONS.includes(normalized)) return normalized;
+  return "medium";
+};
+
 export default function AdminDashboard() {
   const router = useRouter();
   const getTodayISO = () => {
@@ -144,6 +189,11 @@ export default function AdminDashboard() {
   const [activeView, setActiveView] = useState("progress");
   const [filterName, setFilterName] = useState("");
   const [selectedStatuses, setSelectedStatuses] = useState(new Set(["all"]));
+  const [performanceStartDate, setPerformanceStartDate] = useState("");
+  const [performanceEndDate, setPerformanceEndDate] = useState("");
+  const [bulkEntryMode, setBulkEntryMode] = useState("file");
+  const [inlineBulkRows, setInlineBulkRows] = useState(() => buildInitialInlineRows());
+  const [inlinePasteValue, setInlinePasteValue] = useState("");
 
   // actual status map (editable boxes per task)
   const [actualStatusMap, setActualStatusMap] = useState({});
@@ -375,6 +425,122 @@ export default function AdminDashboard() {
     if (d instanceof Date) return d;
     const parsed = new Date(d);
     return isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const normalizeToMidnight = (value) => {
+    if (!value) return null;
+    const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    date.setHours(0, 0, 0, 0);
+    return date;
+  };
+
+  const resetInlineSheet = () => {
+    setInlineBulkRows(buildInitialInlineRows());
+    setInlinePasteValue("");
+  };
+
+  const resetBulkPanelInputs = () => {
+    setBulkFile(null);
+    setBulkAssignedUserId("");
+    setBulkAssignedEmail("");
+    setBulkPreviewRows(null);
+    setShowBulkPreview(false);
+    setBulkEntryMode("file");
+    resetInlineSheet();
+  };
+
+  const closeBulkPanel = () => {
+    setShowBulkPanel(false);
+    resetBulkPanelInputs();
+  };
+
+  const updateInlineRow = (rowId, field, value) => {
+    setInlineBulkRows((prev) => prev.map((row) => (row.id === rowId ? { ...row, [field]: value } : row)));
+  };
+
+  const addInlineRows = (count = 1) => {
+    setInlineBulkRows((prev) => [...prev, ...Array.from({ length: count }, () => createInlineRow())]);
+  };
+
+  const removeInlineRow = (rowId) => {
+    setInlineBulkRows((prev) => {
+      if (prev.length === 1) return prev;
+      return prev.filter((row) => row.id !== rowId);
+    });
+  };
+
+  const handleInlinePasteApply = () => {
+    if (!inlinePasteValue.trim()) {
+      alert("Paste rows into the sheet textbox first.");
+      return;
+    }
+
+    const lines = inlinePasteValue
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (lines.length === 0) {
+      alert("No valid rows detected in pasted content.");
+      return;
+    }
+
+    const parsed = lines.map((line) => {
+      const parts = line.split(/\t|,/).map((part) => part.trim());
+      const [title, start, end, status, priority] = parts;
+      const base = createInlineRow();
+      return {
+        ...base,
+        title: title || "",
+        startDate: normalizeDateInputString(start) || "",
+        endDate: normalizeDateInputString(end) || "",
+        status: sanitizeInlineStatus(status),
+        priority: sanitizeInlinePriority(priority),
+      };
+    });
+
+    setInlineBulkRows(parsed.length ? parsed : buildInitialInlineRows());
+    setInlinePasteValue("");
+  };
+
+  const handleInlinePreview = () => {
+    if (!bulkAssignedUserId && !bulkAssignedEmail) {
+      alert("Choose or enter an assignee before previewing.");
+      return;
+    }
+
+    const rows = inlineBulkRows
+      .map((row) => ({
+        title: row.title.trim(),
+        startDate: row.startDate || null,
+        endDate: row.endDate || null,
+        status: sanitizeInlineStatus(row.status),
+        priority: sanitizeInlinePriority(row.priority),
+      }))
+      .filter((row) => row.title);
+
+    if (rows.length === 0) {
+      alert("Add at least one task title before previewing.");
+      return;
+    }
+
+    const invalidRow = rows.find((row) => row.startDate && row.endDate && new Date(row.startDate) > new Date(row.endDate));
+    if (invalidRow) {
+      alert(`Start date cannot be after end date for "${invalidRow.title}".`);
+      return;
+    }
+
+    setBulkPreviewRows(rows);
+    setShowBulkPreview(true);
+  };
+
+  const handleBulkEntryModeChange = (mode) => {
+    if (mode === bulkEntryMode) return;
+    setBulkEntryMode(mode);
+    if (mode === "sheet") {
+      setBulkFile(null);
+    }
   };
 
   // normalize status strings and map to canonical set
@@ -682,12 +848,12 @@ export default function AdminDashboard() {
 
     const scoreValue = Number(scoreText);
     if (Number.isNaN(scoreValue)) {
-      alert("Enter a numeric KPI score between 0 and 100.");
+      alert("Enter a numeric KPI score of 0 or higher.");
       return;
     }
 
-    if (scoreValue < 0 || scoreValue > 100) {
-      alert("KPI score must be within 0 and 100.");
+    if (scoreValue < 0) {
+      alert("KPI score cannot be negative.");
       return;
     }
 
@@ -1169,7 +1335,7 @@ export default function AdminDashboard() {
   };
 
   const gradeFromTotal = (score) => {
-    if (score >= 91) return "A";
+    if (score > 90) return "A"; // totals above 90 (even 100+) should always be grade A
     if (score >= 81) return "B";
     return "C";
   };
@@ -1216,6 +1382,22 @@ export default function AdminDashboard() {
 
   const pendingKpiScoreExists = pendingKpiScoreKey ? kpiData[pendingKpiScoreKey] : null;
 
+  const performanceFilteredTasks = useMemo(() => {
+    if (!performanceStartDate && !performanceEndDate) return tasks;
+    const startFilter = performanceStartDate ? normalizeToMidnight(performanceStartDate) : null;
+    const endFilter = performanceEndDate ? normalizeToMidnight(performanceEndDate) : null;
+
+    return tasks.filter((task) => {
+      const start = normalizeToMidnight(toDateObj(task.startDate));
+      const end = normalizeToMidnight(toDateObj(task.endDate));
+      const comparisonDate = end || start;
+      if (!comparisonDate) return false;
+      if (startFilter && comparisonDate < startFilter) return false;
+      if (endFilter && comparisonDate > endFilter) return false;
+      return true;
+    });
+  }, [tasks, performanceStartDate, performanceEndDate]);
+
   // 🔹 Evaluation: aggregate weighted scores across modules
   const evaluation = useMemo(() => {
     const employees = (users || []).filter((u) => (u.role || "employee").toLowerCase() === "employee");
@@ -1228,7 +1410,7 @@ export default function AdminDashboard() {
         const userId = u.uid || u.id || u.email;
         const emailLower = (u.email || "").toLowerCase();
 
-        const userTasks = (tasks || []).filter((task) => {
+        const userTasks = (performanceFilteredTasks || []).filter((task) => {
           const assignedId = task.assignedTo || task.assignedToId || "";
           const assignedEmail = (task.assignedEmail || "").toLowerCase();
           const matchesId = assignedId && (
@@ -1269,7 +1451,8 @@ export default function AdminDashboard() {
           if (entry.userEmail && emailLower && entry.userEmail.toLowerCase() === emailLower) return true;
           return false;
         });
-        const kpiAverage = calcAverage(userKpis.map((entry) => Number(entry.score) || 0));
+        const kpiScores = userKpis.map((entry) => Number(entry.score) || 0);
+        const kpiAverage = calcAverage(kpiScores);
         const kpiWeighted = toOneDecimal((kpiAverage / 100) * 15);
 
         const total = toOneDecimal(
@@ -1290,7 +1473,7 @@ export default function AdminDashboard() {
         };
       })
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [users, tasks, kpiData, calculateAttendancePercentage]);
+  }, [users, performanceFilteredTasks, kpiData, calculateAttendancePercentage]);
 
   // Graph filters for DashboardAnalytics in progress view
   const [graphUserFilter, setGraphUserFilter] = useState(""); // '' => all
@@ -1868,7 +2051,7 @@ export default function AdminDashboard() {
 
                     <div className="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
                       <p className="text-sm text-blue-800">
-                        <span className="font-semibold">Monthly KPI:</span> Record one score per member per month. Scores are out of 100 and contribute 15 marks to the evaluation weighting.
+                        <span className="font-semibold">Monthly KPI:</span> Record one score per member per month. Scores start at 0 and can exceed 100, contributing 15 marks per entry to the evaluation weighting.
                       </p>
                     </div>
 
@@ -1952,15 +2135,14 @@ export default function AdminDashboard() {
                               </select>
                             </div>
                             <div>
-                              <label className="block text-sm font-semibold mb-2">Score (0-100)</label>
+                              <label className="block text-sm font-semibold mb-2">Score (0 or higher)</label>
                               <input
                                 type="number"
                                 min="0"
-                                max="100"
                                 value={kpiScoreInput}
                                 onChange={(e) => setKpiScoreInput(e.target.value)}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-                                placeholder="0-100"
+                                placeholder="e.g. 120"
                               />
                             </div>
                           </div>
@@ -2352,6 +2534,7 @@ export default function AdminDashboard() {
                         <th className="p-2 text-left">Title</th>
                         <th className="p-2 text-left">Start</th>
                         <th className="p-2 text-left">End</th>
+                        <th className="p-2 text-left">Status</th>
                         <th className="p-2 text-left">Priority</th>
                       </tr>
                     </thead>
@@ -2361,7 +2544,8 @@ export default function AdminDashboard() {
                           <td className="p-2">{r.title}</td>
                           <td className="p-2">{r.startDate || '-'}</td>
                           <td className="p-2">{r.endDate || '-'}</td>
-                          <td className="p-2">{r.priority}</td>
+                          <td className="p-2 capitalize">{r.status || 'pending'}</td>
+                          <td className="p-2 capitalize">{r.priority}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -2378,6 +2562,8 @@ export default function AdminDashboard() {
                         startDate: r.startDate || null,
                         endDate: r.endDate || null,
                         priority: r.priority || 'medium',
+                        status: sanitizeInlineStatus(r.status || 'pending'),
+                        actualStatus: r.actualStatus || '',
                         assignedTo: bulkAssignedUserId || '',
                         assignedEmail: bulkAssignedEmail || '',
                         assignedName: (() => {
@@ -2391,10 +2577,7 @@ export default function AdminDashboard() {
                       if (!res.ok) throw new Error(data.error || 'Upload failed');
                       alert(`Created ${data.count || 0} tasks.`);
                       setShowBulkPreview(false);
-                      setShowBulkPanel(false);
-                      setBulkFile(null);
-                      setBulkAssignedUserId('');
-                      setBulkAssignedEmail('');
+                      closeBulkPanel();
                     } catch (err) {
                       console.error(err);
                       alert('Bulk create failed: ' + (err.message || err));
@@ -2643,9 +2826,9 @@ export default function AdminDashboard() {
             <div className="fixed left-72 right-6 top-6 z-50 animate-slide-down">
               <div className="bg-white p-6 rounded-2xl shadow-lg relative">
                 <div className="absolute right-3 top-3">
-                  <button onClick={() => setShowBulkPanel(false)} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
+                  <button onClick={closeBulkPanel} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
                 </div>
-                <h2 className="text-xl font-semibold mb-4">📥 Bulk Add Tasks (CSV / XLSX)</h2>
+                <h2 className="text-xl font-semibold mb-4">📥 Bulk Add Tasks</h2>
 
                 <div className="mb-3">
                   <label className="text-sm text-gray-600">Assign all tasks to (choose member)</label>
@@ -2683,83 +2866,238 @@ export default function AdminDashboard() {
                 </div>
 
                 <div className="mb-4">
-                  <label className="text-sm text-gray-600">Upload file (.csv or .xlsx)</label>
-                  <input type="file" accept=".csv,.xlsx,.xls" onChange={(e) => setBulkFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)} className="mt-2" />
-                  <div className="text-xs text-gray-500 mt-2">File must have headers: <code>title</code>, <code>startDate</code>, <code>endDate</code>. <code>priority</code> optional.</div>
+                  <label className="text-sm font-semibold text-gray-700">Choose entry mode</label>
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    <button
+                      type="button"
+                      onClick={() => handleBulkEntryModeChange('file')}
+                      className={`px-4 py-2 rounded-lg text-sm font-semibold ${bulkEntryMode === 'file' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700'}`}
+                    >
+                      Upload file
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleBulkEntryModeChange('sheet')}
+                      className={`px-4 py-2 rounded-lg text-sm font-semibold ${bulkEntryMode === 'sheet' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700'}`}
+                    >
+                      Inline sheet (no Excel)
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">Select “Inline sheet” to paste tasks directly once a member is chosen.</p>
                 </div>
 
-                <div className="flex gap-3">
-                  <button onClick={async () => {
-                    // parse and show preview for confirmation
-                    if (!bulkFile) { alert('Please choose a file to upload.'); return; }
-                    if (!bulkAssignedUserId && !bulkAssignedEmail) { alert('Please choose or enter an assignee.'); return; }
+                {bulkEntryMode === 'file' ? (
+                  <>
+                    <div className="mb-4">
+                      <label className="text-sm text-gray-600">Upload file (.csv or .xlsx)</label>
+                      <input type="file" accept=".csv,.xlsx,.xls" onChange={(e) => setBulkFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)} className="mt-2" />
+                      <div className="text-xs text-gray-500 mt-2">
+                        File must have headers: <code>title</code>, <code>startDate</code>, <code>endDate</code>. Columns <code>priority</code> & <code>status</code> are optional.
+                      </div>
+                    </div>
 
-                    setBulkUploading(true);
-                    try {
-                      const rows = [];
-                      const name = (bulkFile.name || '').toLowerCase();
-                      if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
-                        const data = await bulkFile.arrayBuffer();
-                        const workbook = XLSX.read(data, { type: 'array' });
-                        const sheetName = workbook.SheetNames[0];
-                        const sheet = workbook.Sheets[sheetName];
-                        const json = XLSX.utils.sheet_to_json(sheet, { defval: '' });
-                        json.forEach((r) => rows.push(r));
-                      } else {
-                        const result = await new Promise((resolve, reject) => {
-                          Papa.parse(bulkFile, {
-                            header: true,
-                            skipEmptyLines: true,
-                            complete: (res) => resolve(res),
-                            error: (err) => reject(err),
-                          });
-                        });
-                        (result.data || []).forEach((r) => rows.push(r));
-                      }
+                    <div className="flex gap-3">
+                      <button onClick={async () => {
+                        // parse and show preview for confirmation
+                        if (!bulkFile) { alert('Please choose a file to upload.'); return; }
+                        if (!bulkAssignedUserId && !bulkAssignedEmail) { alert('Please choose or enter an assignee.'); return; }
 
-                      if (!rows || rows.length === 0) {
-                        alert('No rows found in file.');
-                        setBulkUploading(false);
-                        return;
-                      }
+                        setBulkUploading(true);
+                        try {
+                          const rows = [];
+                          const name = (bulkFile.name || '').toLowerCase();
+                          if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
+                            const data = await bulkFile.arrayBuffer();
+                            const workbook = XLSX.read(data, { type: 'array' });
+                            const sheetName = workbook.SheetNames[0];
+                            const sheet = workbook.Sheets[sheetName];
+                            const json = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+                            json.forEach((r) => rows.push(r));
+                          } else {
+                            const result = await new Promise((resolve, reject) => {
+                              Papa.parse(bulkFile, {
+                                header: true,
+                                skipEmptyLines: true,
+                                complete: (res) => resolve(res),
+                                error: (err) => reject(err),
+                              });
+                            });
+                            (result.data || []).forEach((r) => rows.push(r));
+                          }
 
-                      // normalize rows for preview
-                      const normalized = rows.map((r) => {
-                        const keys = Object.keys(r || {});
-                        const norm = {};
-                        keys.forEach((k) => { norm[k.toString().toLowerCase().replace(/\s|_/g,'')] = r[k]; });
-                        const titleVal = norm['title'] || norm['task'] || '';
-                        const sdRaw = norm['startdate'] || norm['start_date'] || '';
-                        const edRaw = norm['enddate'] || norm['end_date'] || '';
-                        const rawPr = (norm['priority'] || '').toString().toLowerCase().trim();
-                        const allowed = ['high', 'medium', 'low'];
-                        const pr = allowed.includes(rawPr) ? rawPr : 'medium';
-                        return {
-                          title: titleVal,
-                          startDate: sdRaw || null,
-                          endDate: edRaw || null,
-                          priority: pr,
-                        };
-                      }).filter(r=>r.title);
+                          if (!rows || rows.length === 0) {
+                            alert('No rows found in file.');
+                            setBulkUploading(false);
+                            return;
+                          }
 
-                      if (!normalized || normalized.length === 0) {
-                        alert('No valid task rows found in file. Ensure there is a title column.');
-                        setBulkUploading(false);
-                        return;
-                      }
+                          // normalize rows for preview
+                          const normalized = rows.map((r) => {
+                            const keys = Object.keys(r || {});
+                            const norm = {};
+                            keys.forEach((k) => { norm[k.toString().toLowerCase().replace(/\s|_/g,'')] = r[k]; });
+                            const titleVal = norm['title'] || norm['task'] || '';
+                            const sdRaw = norm['startdate'] || norm['start_date'] || '';
+                            const edRaw = norm['enddate'] || norm['end_date'] || '';
+                            const rawStatus = norm['status'] || norm['taskstatus'] || '';
+                            const rawPr = (norm['priority'] || '').toString();
+                            const startDateVal = normalizeDateInputString(sdRaw) || (sdRaw || null);
+                            const endDateVal = normalizeDateInputString(edRaw) || (edRaw || null);
+                            return {
+                              title: titleVal,
+                              startDate: startDateVal,
+                              endDate: endDateVal,
+                              priority: sanitizeInlinePriority(rawPr),
+                              status: sanitizeInlineStatus(rawStatus),
+                            };
+                          }).filter(r=>r.title);
 
-                      setBulkPreviewRows(normalized);
-                      setShowBulkPreview(true);
-                    } catch (err) {
-                      console.error(err);
-                      alert('Bulk upload parse failed: ' + (err.message || err));
-                    } finally {
-                      setBulkUploading(false);
-                    }
-                  }} disabled={bulkUploading} className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded">Preview</button>
+                          if (!normalized || normalized.length === 0) {
+                            alert('No valid task rows found in file. Ensure there is a title column.');
+                            setBulkUploading(false);
+                            return;
+                          }
 
-                  <button type="button" onClick={() => { setShowBulkPanel(false); setBulkFile(null); setBulkAssignedEmail(''); setBulkAssignedUserId(''); }} className="bg-gray-100 px-4 py-2 rounded">Cancel</button>
-                </div>
+                          setBulkPreviewRows(normalized);
+                          setShowBulkPreview(true);
+                        } catch (err) {
+                          console.error(err);
+                          alert('Bulk upload parse failed: ' + (err.message || err));
+                        } finally {
+                          setBulkUploading(false);
+                        }
+                      }} disabled={bulkUploading} className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded">Preview</button>
+
+                      <button type="button" onClick={closeBulkPanel} className="bg-gray-100 px-4 py-2 rounded">Cancel</button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="space-y-4">
+                    {(!bulkAssignedUserId && !bulkAssignedEmail) ? (
+                      <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm text-yellow-800">
+                        Select a member or enter an email to unlock the paste-ready sheet.
+                      </div>
+                    ) : (
+                      <>
+                        <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 text-sm text-indigo-800">
+                          Paste rows from any spreadsheet (Title, Start Date, End Date, Status, Priority) or type directly into the grid below. Status accepts Pending, In process, Completed, Delayed or Cancelled.
+                        </div>
+                        <div className="overflow-x-auto border rounded-lg">
+                          <table className="min-w-full text-sm">
+                            <thead>
+                              <tr className="bg-gray-100 text-left">
+                                <th className="p-2 text-xs text-gray-500">#</th>
+                                <th className="p-2">Task title</th>
+                                <th className="p-2">Start</th>
+                                <th className="p-2">End</th>
+                                <th className="p-2">Status</th>
+                                <th className="p-2">Priority</th>
+                                <th className="p-2 text-right">Remove</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {inlineBulkRows.map((row, idx) => (
+                                <tr key={row.id} className="border-b">
+                                  <td className="p-2 text-xs text-gray-500">{idx + 1}</td>
+                                  <td className="p-2">
+                                    <input
+                                      type="text"
+                                      value={row.title}
+                                      onChange={(e) => updateInlineRow(row.id, 'title', e.target.value)}
+                                      placeholder="Task title"
+                                      className="w-full border rounded px-2 py-1"
+                                    />
+                                  </td>
+                                  <td className="p-2">
+                                    <input
+                                      type="date"
+                                      value={row.startDate}
+                                      onChange={(e) => updateInlineRow(row.id, 'startDate', e.target.value)}
+                                      className="w-full border rounded px-2 py-1"
+                                    />
+                                  </td>
+                                  <td className="p-2">
+                                    <input
+                                      type="date"
+                                      value={row.endDate}
+                                      onChange={(e) => updateInlineRow(row.id, 'endDate', e.target.value)}
+                                      className="w-full border rounded px-2 py-1"
+                                    />
+                                  </td>
+                                  <td className="p-2">
+                                    <select
+                                      value={row.status}
+                                      onChange={(e) => updateInlineRow(row.id, 'status', e.target.value)}
+                                      className="w-full border rounded px-2 py-1"
+                                    >
+                                      {INLINE_STATUS_OPTIONS.map((status) => (
+                                        <option key={status} value={status}>
+                                          {status.replace(/\b\w/g, (char) => char.toUpperCase())}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </td>
+                                  <td className="p-2">
+                                    <select
+                                      value={row.priority}
+                                      onChange={(e) => updateInlineRow(row.id, 'priority', e.target.value)}
+                                      className="w-full border rounded px-2 py-1"
+                                    >
+                                      {INLINE_PRIORITY_OPTIONS.map((priorityOpt) => (
+                                        <option key={priorityOpt} value={priorityOpt}>
+                                          {priorityOpt.charAt(0).toUpperCase() + priorityOpt.slice(1)}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </td>
+                                  <td className="p-2 text-right">
+                                    <button
+                                      type="button"
+                                      onClick={() => removeInlineRow(row.id)}
+                                      disabled={inlineBulkRows.length === 1}
+                                      className="text-xs px-3 py-1 rounded bg-red-50 text-red-600 disabled:opacity-40"
+                                    >
+                                      Remove
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button type="button" onClick={() => addInlineRows(1)} className="px-3 py-1 rounded bg-gray-100 text-sm">+ Add row</button>
+                          <button type="button" onClick={() => addInlineRows(5)} className="px-3 py-1 rounded bg-gray-100 text-sm">+ Add 5 rows</button>
+                          <button type="button" onClick={resetInlineSheet} className="px-3 py-1 rounded bg-gray-100 text-sm">Clear sheet</button>
+                        </div>
+                        <div>
+                          <label className="text-sm text-gray-600">Paste rows (Title, Start, End, Status, Priority)</label>
+                          <textarea
+                            rows={4}
+                            value={inlinePasteValue}
+                            onChange={(e) => setInlinePasteValue(e.target.value)}
+                            placeholder="Task A\t2025-01-01\t2025-01-15\tPending\tHigh"
+                            className="w-full border rounded px-3 py-2 text-sm mt-2"
+                          ></textarea>
+                          <div className="flex justify-end gap-2 mt-2">
+                            <button
+                              type="button"
+                              onClick={handleInlinePasteApply}
+                              disabled={!inlinePasteValue.trim()}
+                              className="px-4 py-2 rounded text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40"
+                            >
+                              Fill sheet from paste
+                            </button>
+                          </div>
+                        </div>
+                        <div className="flex justify-end gap-2">
+                          <button type="button" onClick={closeBulkPanel} className="bg-gray-100 px-4 py-2 rounded">Cancel</button>
+                          <button type="button" onClick={handleInlinePreview} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">Save & Preview</button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -2789,9 +3127,44 @@ export default function AdminDashboard() {
       {activeView === "progress" && (
         <div className="bg-white p-6 rounded-2xl shadow-md mb-6 transition-all duration-300 ease-in-out transform">
           <h2 className="text-xl font-semibold mb-4">📊 Employee Performance Overview</h2>
+          <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end">
+            <div className="flex flex-col">
+              <label className="text-sm font-semibold text-gray-600">Start date</label>
+              <input
+                type="date"
+                value={performanceStartDate}
+                onChange={(e) => setPerformanceStartDate(e.target.value)}
+                max={performanceEndDate || undefined}
+                className="border rounded-lg px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="text-sm font-semibold text-gray-600">End date</label>
+              <input
+                type="date"
+                value={performanceEndDate}
+                onChange={(e) => setPerformanceEndDate(e.target.value)}
+                min={performanceStartDate || undefined}
+                className="border rounded-lg px-3 py-2 text-sm"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setPerformanceStartDate("");
+                setPerformanceEndDate("");
+              }}
+              disabled={!performanceStartDate && !performanceEndDate}
+              className="px-4 py-2 rounded-lg text-sm font-semibold bg-gray-200 text-gray-700 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Clear filters
+            </button>
+          </div>
           <div className="bg-gray-50 p-4 rounded-lg border mb-4">
           <h3 className="text-lg font-semibold mb-2">Evaluation</h3>
-          <div className="text-xs text-gray-500 mb-3">Grades: A (91-100), B (81-90), C (80 and below)</div>
+          <div className="text-xs text-gray-500 mb-3">
+            Grades: A (91 and above), B (81-90), C (80 and below). Any total above 90 — even if KPI bonuses push it past 100 — is treated as grade A.
+          </div>
 
             <div className="max-h-64 overflow-auto mb-2">
               <table className="min-w-full text-sm">
@@ -2812,11 +3185,9 @@ export default function AdminDashboard() {
                     </th>
                     <th className="p-3 text-left">
                       <div>KPI</div>
-                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 15 weightage)</div>
                     </th>
                     <th className="p-3 text-left">
                       <div>Total</div>
-                      <div className="text-[10px] font-normal normal-case text-gray-400">(overall out of 100)</div>
                     </th>
                     <th className="p-3 text-left">
                       <div>Grade</div>
@@ -2850,10 +3221,10 @@ export default function AdminDashboard() {
                         </td>
                         <td className="p-3 align-top">
                           <div className="font-semibold text-gray-800">{formatOneDecimalString(e.kpi.weighted)} / 15</div>
-                          <div className="text-xs text-gray-500">Avg {formatOneDecimalString(e.kpi.raw)}%</div>
+                          <div className="text-xs text-gray-500">Total Avg {formatOneDecimalString(e.kpi.raw)}%</div>
                         </td>
                         <td className="p-3 align-top">
-                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.total)} / 100</div>
+                          <div className="font-semibold text-gray-800">{formatOneDecimalString(e.total)}</div>
                         </td>
                         <td className="p-3 align-top">
                           <div className={`text-sm font-semibold ${gradeColorClass(e.grade)}`}>{e.grade}</div>
@@ -2865,7 +3236,7 @@ export default function AdminDashboard() {
               </table>
             </div>
 
-            <div className="text-xs text-gray-500">Weights: Task Closing 50, Attendance 15, Quality 20, KPI 15.</div>
+            <div className="text-xs text-gray-500">Weights: Task Closing 50, Attendance 15, Quality 20, KPI 15 per recorded score (totals can exceed 100 when multiple KPI scores are present).</div>
         </div>
 
         <div className="mt-2">
