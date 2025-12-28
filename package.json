@@ -9,7 +9,6 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@dataconnect/generated": "file:src/dataconnect-generated",
     "firebase": "^12.4.0",
     "firebase-admin": "^13.6.0",
     "next": "16.0.0",
