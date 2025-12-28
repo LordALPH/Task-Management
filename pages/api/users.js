@@ -1,5 +1,5 @@
-import { usersService } from "../../../lib/firebaseService";
-import { activityLogsService } from "../../../lib/firebaseService";
+import { usersService } from "../../lib/firebaseService";
+import { activityLogsService } from "../../lib/firebaseService";
 
 export default async function handler(req, res) {
   const { method } = req;

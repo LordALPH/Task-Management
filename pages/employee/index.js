@@ -1,2 +1,2 @@
-// Re-export employee dashboard from the existing `app old` folder
-export { default } from "../app old/employee/page";
+// Re-export employee dashboard from the relocated legacy folder
+export { default } from "../../legacy/app-old/employee/page";

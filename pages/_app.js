@@ -1,4 +1,4 @@
-import "./app old/globals.css";
+import "../legacy/app-old/globals.css";
 import { AuthProvider } from "../context/AuthContext";
 
 export default function MyApp({ Component, pageProps }) {

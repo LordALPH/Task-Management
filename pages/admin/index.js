@@ -1,2 +1,2 @@
-// Re-export admin dashboard from the existing `app old` folder
-export { default } from "../app old/admin/page";
+// Re-export admin dashboard from the relocated legacy folder
+export { default } from "../../legacy/app-old/admin/page";

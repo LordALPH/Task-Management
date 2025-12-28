@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useRouter } from "next/router";
-import { authHelper } from "../../lib/authHelper";
+import { authHelper } from "../lib/authHelper";
 
 export default function FirebaseLoginPage() {
   const router = useRouter();
