@@ -19,7 +19,6 @@ import {
 } from "firebase/firestore";
 import { createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
 import DashboardAnalytics from "./component/DashboardAnalytics";
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 
@@ -1686,6 +1685,21 @@ export default function AdminDashboard() {
       { name: 'Cancelled', value: counts.cancelled },
     ];
   }, [tasks]);
+
+  const selectedGraphUserMeta = useMemo(() => {
+    if (!graphUserFilter) {
+      return { id: "", email: "", name: "" };
+    }
+    const match = users.find((u) => (u.uid || u.id) === graphUserFilter);
+    if (!match) {
+      return { id: "", email: "", name: "" };
+    }
+    return {
+      id: match.uid || match.id || "",
+      email: match.email || "",
+      name: match.name || match.email || "",
+    };
+  }, [graphUserFilter, users]);
 
   // compute reminders: tasks pending and due within next 3 days (including today)
   const remindersList = useMemo(() => {
@@ -3426,40 +3440,14 @@ export default function AdminDashboard() {
           </div>
 
           <div className="p-3 bg-gray-50 rounded-lg">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <DashboardAnalytics tasks={filteredTasksForGraph} />
-              </div>
-              <div className="flex flex-col bg-white p-3 rounded h-full">
-                <h5 className="text-sm font-semibold mb-2">Overall Status Distribution</h5>
-                <div className="h-80">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie dataKey="value" data={pieData} innerRadius={40} outerRadius={60} paddingAngle={2} label={({ name, percent }) => `${name} (${Math.round(percent*100)}%)`}>
-                        {pieData.map((entry, idx) => (
-                          <Cell key={`cell-${idx}`} fill={["#10B981", "#F59E0B", "#EF4444", "#6B7280"][idx % 4]} />
-                        ))}
-                      </Pie>
-                      <Tooltip />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-
-                {/* Fill below the pie chart with recent task details so space is not empty */}
-                <div className="mt-3 overflow-auto">
-                  <h6 className="text-xs text-gray-500 mb-2">Recent Tasks</h6>
-                  <div className="space-y-2">
-                    {tasks.slice(0,6).map((t) => (
-                      <div key={t.id} className="p-2 border rounded text-sm">
-                        <div className="font-medium">{t.title}</div>
-                        <div className="text-xs text-gray-500">{t.assignedName || t.assignedEmail} • {formatDate(t.endDate)}</div>
-                      </div>
-                    ))}
-                    {tasks.length === 0 && <div className="text-xs text-gray-500">No tasks</div>}
-                  </div>
-                </div>
-              </div>
-            </div>
+            <DashboardAnalytics
+              tasks={filteredTasksForGraph}
+              overallPieData={pieData}
+              recentTasks={tasks}
+              selectedUserId={selectedGraphUserMeta.id}
+              selectedUserEmail={selectedGraphUserMeta.email}
+              selectedUserName={selectedGraphUserMeta.name}
+            />
           </div>
         </div>
       </div>

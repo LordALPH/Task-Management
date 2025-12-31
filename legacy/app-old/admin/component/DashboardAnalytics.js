@@ -11,6 +11,9 @@ import {
   LineChart,
   Line,
   CartesianGrid,
+  PieChart,
+  Pie,
+  Cell,
 } from "recharts";
 
 const canonicalStatus = (status = "") => {
@@ -20,20 +23,30 @@ const canonicalStatus = (status = "") => {
   return normalized;
 };
 
-const DashboardAnalytics = ({ tasks }) => {
+const DashboardAnalytics = ({
+  tasks = [],
+  overallPieData = [],
+  recentTasks = [],
+  selectedUserId = "",
+  selectedUserEmail = "",
+  selectedUserName = "",
+}) => {
   const [filter, setFilter] = useState("all");
+  const trimmedSelectedEmail = (selectedUserEmail || "").trim();
+  const normalizedSelectedEmail = trimmedSelectedEmail.toLowerCase();
+  const normalizedSelectedName = (selectedUserName || "").toString().trim().toLowerCase();
+  const normalizedSelectedId = selectedUserId ? selectedUserId.toString().trim() : "";
 
-  // 🔹 Filter tasks by date range
   const filteredTasks = useMemo(() => {
     if (!tasks || tasks.length === 0) return [];
     if (filter === "all") return tasks;
 
     const now = new Date();
     return tasks.filter((task) => {
-      const due =
-        task.dueDate?.seconds
-          ? new Date(task.dueDate.seconds * 1000)
-          : new Date(task.dueDate);
+      const rawDue = task.dueDate || task.endDate;
+      if (!rawDue) return false;
+      const due = rawDue?.seconds ? new Date(rawDue.seconds * 1000) : new Date(rawDue);
+      if (Number.isNaN(due.getTime())) return false;
 
       if (filter === "7days") {
         const sevenDaysAgo = new Date(now);
@@ -42,158 +55,220 @@ const DashboardAnalytics = ({ tasks }) => {
       }
 
       if (filter === "month") {
-        return (
-          due.getMonth() === now.getMonth() &&
-          due.getFullYear() === now.getFullYear()
-        );
+        return due.getMonth() === now.getMonth() && due.getFullYear() === now.getFullYear();
       }
 
       return true;
     });
   }, [filter, tasks]);
 
-  // 🔹 KPIs
-  const completedTasks = filteredTasks.filter((t) => canonicalStatus(t.status) === "completed");
-  const delayedTasks = filteredTasks.filter((t) => canonicalStatus(t.status) === "delayed");
-  const totalTasks = completedTasks.length + delayedTasks.length;
-  const activeEmployees = new Set([
-    ...completedTasks.map((t) => t.assignedEmail),
-    ...delayedTasks.map((t) => t.assignedEmail),
-  ]).size;
+  const completedTasks = useMemo(
+    () => filteredTasks.filter((t) => canonicalStatus(t.status) === "completed"),
+    [filteredTasks]
+  );
 
-  // 🔹 Chart Data with Due Dates
-  const taskStats = {};
-  filteredTasks.forEach((task) => {
-    const status = canonicalStatus(task.status);
-    if (status !== "completed" && status !== "delayed") return;
-    const email = task.assignedEmail || "Unknown";
-    const due =
-      task.dueDate?.seconds
-        ? new Date(task.dueDate.seconds * 1000)
-        : new Date(task.dueDate);
+  const delayedTasks = useMemo(
+    () => filteredTasks.filter((t) => canonicalStatus(t.status) === "delayed"),
+    [filteredTasks]
+  );
 
-    if (!taskStats[email]) {
-      taskStats[email] = {
-        completed: 0,
-        delayed: 0,
-        dueDates: [],
-        overdue: 0,
+  const inProcessTasks = useMemo(
+    () =>
+      filteredTasks.filter((t) => {
+        const normalized = canonicalStatus(t.status);
+        return normalized !== "completed" && normalized !== "delayed";
+      }),
+    [filteredTasks]
+  );
+
+  const totalTasks = filteredTasks.length;
+
+  const activeEmployees = useMemo(() => {
+    const assignees = filteredTasks.map((t) => t.assignedEmail || t.assignedTo || "Unknown");
+    return new Set(assignees).size;
+  }, [filteredTasks]);
+
+  const chartData = useMemo(() => {
+    const stats = {};
+
+    filteredTasks.forEach((task) => {
+      const status = canonicalStatus(task.status);
+      const email = task.assignedEmail || task.assignedTo || "Unknown";
+
+      if (!stats[email]) {
+        stats[email] = {
+          completed: 0,
+          delayed: 0,
+          inProcess: 0,
+          dueDates: [],
+          overdue: 0,
+        };
+      }
+
+      if (status === "completed") stats[email].completed += 1;
+      else if (status === "delayed") stats[email].delayed += 1;
+      else stats[email].inProcess += 1;
+
+      const dueDateSource = task.dueDate || task.endDate;
+      if (dueDateSource) {
+        const due = dueDateSource.seconds ? new Date(dueDateSource.seconds * 1000) : new Date(dueDateSource);
+        if (!Number.isNaN(due.getTime())) {
+          stats[email].dueDates.push(due);
+          if (status === "delayed" && due < new Date()) {
+            stats[email].overdue += 1;
+          }
+        }
+      }
+    });
+
+    return Object.keys(stats).map((email) => {
+      const data = stats[email];
+      const total = data.completed + data.delayed + data.inProcess;
+      const nextDue =
+        data.dueDates.length > 0
+          ? new Date(Math.min(...data.dueDates.map((d) => d.getTime()))).toLocaleDateString()
+          : "N/A";
+
+      return {
+        name: email,
+        Completed: data.completed,
+        Delayed: data.delayed,
+        InProcess: data.inProcess,
+        Overdue: data.overdue,
+        Total: total,
+        NextDue: nextDue,
       };
-    }
+    });
+  }, [filteredTasks]);
 
-    if (status === "completed") taskStats[email].completed++;
-    else if (status === "delayed") taskStats[email].delayed++;
-
-    // Track due dates
-    taskStats[email].dueDates.push(due);
-
-    // Track overdue count
-    if (due < new Date() && status === "delayed") {
-      taskStats[email].overdue++;
-    }
-  });
-
-  const chartData = Object.keys(taskStats).map((email) => {
-    const data = taskStats[email];
-    const nextDue =
-      data.dueDates.length > 0
-        ? new Date(
-            Math.min(...data.dueDates.map((d) => d.getTime()))
-          ).toLocaleDateString()
-        : "N/A";
-
-    return {
-      name: email,
-      Completed: data.completed,
-      Delayed: data.delayed,
-      Overdue: data.overdue,
-      NextDue: nextDue,
-    };
-  });
-
-  // Build per-user timeline data when a single user is selected
-  const selectedUserEmail = chartData.length === 1 ? chartData[0].name : null;
+  const detailUserEmail = trimmedSelectedEmail || (chartData.length === 1 ? chartData[0].name : "");
+  const normalizedDetailUserEmail = detailUserEmail ? detailUserEmail.trim().toLowerCase() : "";
 
   const timelineData = useMemo(() => {
-    if (!selectedUserEmail) return [];
-    // group by due date (use dueDate or endDate)
+    if (!normalizedDetailUserEmail) return [];
+
     const map = {};
+    const now = new Date();
+
     filteredTasks.forEach((task) => {
-      const email = task.assignedEmail || "Unknown";
-      if (email !== selectedUserEmail) return;
+      const email = (task.assignedEmail || task.assignedTo || "Unknown").toString().trim().toLowerCase();
+      if (email !== normalizedDetailUserEmail) return;
+
       let due = null;
       if (task.dueDate) {
         due = task.dueDate.seconds ? new Date(task.dueDate.seconds * 1000) : new Date(task.dueDate);
       } else if (task.endDate) {
-        due = task.endDate.toDate ? task.endDate.toDate() : new Date(task.endDate);
+        due = task.endDate.seconds ? new Date(task.endDate.seconds * 1000) : new Date(task.endDate);
       }
-      if (!due) return;
+
+      if (!due || Number.isNaN(due.getTime())) return;
       const key = due.toLocaleDateString();
       if (!map[key]) map[key] = { date: key, Completed: 0, Delayed: 0, Overdue: 0 };
-      const now = new Date();
+
       const status = canonicalStatus(task.status);
-      if (status === "completed") map[key].Completed++;
-      else if (status === "delayed") map[key].Delayed++;
-      if (due < now && status === "delayed") map[key].Overdue++;
+      if (status === "completed") map[key].Completed += 1;
+      if (status === "delayed") {
+        map[key].Delayed += 1;
+        if (due < now) map[key].Overdue += 1;
+      }
     });
 
-    // convert to sorted array
     return Object.values(map).sort((a, b) => new Date(a.date) - new Date(b.date));
-  }, [filteredTasks, selectedUserEmail]);
+  }, [filteredTasks, normalizedDetailUserEmail]);
+
+  const summaryCards = [
+    { label: "🟢 Total Tasks", value: totalTasks, accent: "text-gray-800" },
+    { label: "✅ Completed", value: completedTasks.length, accent: "text-green-600" },
+    { label: "⏳ Delayed", value: delayedTasks.length, accent: "text-red-500" },
+    { label: "🚧 In-process Task", value: inProcessTasks.length, accent: "text-amber-500" },
+    { label: "👷 Employees Active", value: activeEmployees, accent: "text-blue-600" },
+  ];
+
+  const pieChartData = useMemo(() => {
+    if (overallPieData && overallPieData.length > 0) {
+      return overallPieData.filter((segment) => (segment?.value ?? 0) > 0);
+    }
+
+    const derived = [
+      { name: "Completed", value: completedTasks.length },
+      { name: "Delayed", value: delayedTasks.length },
+      { name: "In Process", value: inProcessTasks.length },
+    ];
+
+    return derived.filter((segment) => segment.value > 0);
+  }, [overallPieData, completedTasks.length, delayedTasks.length, inProcessTasks.length]);
+
+  const pieColors = ["#22c55e", "#fbbf24", "#ef4444", "#6b7280"];
+
+  const relatedTaskEntries = useMemo(() => {
+    const source = (recentTasks && recentTasks.length > 0 ? recentTasks : tasks) || [];
+    if (source.length === 0) return [];
+
+    if (!normalizedSelectedEmail && !normalizedSelectedName && !normalizedSelectedId) {
+      return source.slice(0, 6);
+    }
+
+    const filtered = source.filter((task) => {
+      const taskEmail = (task.assignedEmail || task.assignedTo || "").toString().trim().toLowerCase();
+      if (normalizedSelectedEmail && taskEmail === normalizedSelectedEmail) return true;
+
+      const taskName = (task.assignedName || "").toString().trim().toLowerCase();
+      if (normalizedSelectedName && taskName === normalizedSelectedName) return true;
+
+      const taskId = task.assignedUserId || task.assignedUid || task.userId || task.uid;
+      const normalizedTaskId = taskId ? taskId.toString().trim() : "";
+      if (normalizedSelectedId && normalizedTaskId && normalizedTaskId === normalizedSelectedId) return true;
+
+      return false;
+    });
+
+    const finalList = filtered.length > 0 ? filtered : source;
+    return finalList.slice(0, 6);
+  }, [recentTasks, tasks, normalizedSelectedEmail, normalizedSelectedName, normalizedSelectedId]);
+
+  const formatTaskDate = (value) => {
+    if (!value) return "-";
+    const date = value.seconds ? new Date(value.seconds * 1000) : new Date(value);
+    return Number.isNaN(date.getTime()) ? "-" : date.toLocaleDateString();
+  };
 
   return (
-    <div className="mt-8">
-      {/* 🔹 KPI Summary */}
-      <div className="grid md:grid-cols-4 gap-4 mb-8">
-        <div className="bg-white p-5 rounded-2xl shadow">
-          <div className="flex flex-col items-start gap-1">
-            <p className="text-sm text-gray-500">🟢 Total Tasks</p>
-            <h3 className="text-2xl font-bold text-gray-800">{totalTasks}</h3>
-          </div>
-        </div>
-        <div className="bg-white p-5 rounded-2xl shadow">
-          <div className="flex flex-col items-start gap-1">
-            <p className="text-sm text-gray-500">✅ Completed</p>
-            <h3 className="text-2xl font-bold text-green-600">{completedTasks.length}</h3>
-          </div>
-        </div>
-        <div className="bg-white p-5 rounded-2xl shadow">
-          <div className="flex flex-col items-start gap-1">
-            <p className="text-sm text-gray-500">⏳ Delayed</p>
-            <h3 className="text-2xl font-bold text-red-500">{delayedTasks.length}</h3>
-          </div>
-        </div>
-        <div className="bg-white p-5 rounded-2xl shadow">
-          <div className="flex flex-col items-start gap-1">
-            <p className="text-sm text-gray-500">👷 Employees Active</p>
-            <h3 className="text-2xl font-bold text-blue-600">{activeEmployees}</h3>
-          </div>
+    <div className="space-y-6">
+      <div className="bg-white p-6 rounded-2xl shadow w-full">
+        <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
+          {summaryCards.map((card) => (
+            <div key={card.label} className="bg-gray-50 rounded-xl p-4 flex flex-col gap-1">
+              <p className="text-sm text-gray-500">{card.label}</p>
+              <h3 className={`text-2xl font-bold ${card.accent}`}>{card.value}</h3>
+            </div>
+          ))}
         </div>
       </div>
 
-      {/* 🔹 Filter Selector */}
-      <div className="flex justify-end mb-6">
-        <select
-          className="border p-2 rounded text-sm"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        >
-          <option value="all">All Time</option>
-          <option value="7days">Last 7 Days</option>
-          <option value="month">This Month</option>
-        </select>
-      </div>
-
-      {/* 🔹 Charts */}
-      <div className="bg-white p-6 rounded-2xl shadow-md">
-        <h2 className="text-xl font-semibold mb-4">
-          📊 Employee Performance Overview
-        </h2>
+      <div className="bg-white p-6 rounded-2xl shadow w-full">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between mb-6">
+          <div>
+            <h2 className="text-xl font-semibold">📊 Performance Trends</h2>
+            <p className="text-sm text-gray-500">Track completions and delays across the selected range.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium text-gray-600" htmlFor="dashboard-range-select">Range:</label>
+            <select
+              id="dashboard-range-select"
+              className="border p-2 rounded text-sm"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            >
+              <option value="all">All Time</option>
+              <option value="7days">Last 7 Days</option>
+              <option value="month">This Month</option>
+            </select>
+          </div>
+        </div>
 
         {chartData.length > 0 ? (
-          <div className="grid md:grid-cols-2 gap-8">
-            {/* Bar Chart */}
-            <div className="h-80">
+          <div className="grid lg:grid-cols-2 gap-8">
+            <div className="h-96">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={chartData}>
                   <XAxis dataKey="name" tick={{ fontSize: 10 }} />
@@ -205,10 +280,8 @@ const DashboardAnalytics = ({ tasks }) => {
                 </BarChart>
               </ResponsiveContainer>
             </div>
-
-            {/* Progress Graph for selected user (replaces previous pie chart). */}
-            <div className="h-80">
-              {selectedUserEmail ? (
+            <div className="h-96">
+              {normalizedDetailUserEmail ? (
                 timelineData.length > 0 ? (
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={timelineData} margin={{ top: 10, right: 20, left: 0, bottom: 5 }}>
@@ -224,14 +297,14 @@ const DashboardAnalytics = ({ tasks }) => {
                   </ResponsiveContainer>
                 ) : (
                   <div className="h-full flex flex-col items-center justify-center text-gray-500">
-                    <p className="font-medium">No dated tasks for {selectedUserEmail}</p>
+                    <p className="font-medium">No dated tasks for {detailUserEmail || "this member"}</p>
                     <p className="text-sm">Tasks without a due/end date won't appear here.</p>
                   </div>
                 )
               ) : (
                 <div className="h-full flex flex-col items-center justify-center text-gray-500">
                   <p className="font-medium">Select a user to see detailed progress</p>
-                  <p className="text-sm">Use the 'User' selector above to focus on one member.</p>
+                  <p className="text-sm">Use the analytics filter above to focus on one member.</p>
                 </div>
               )}
             </div>
@@ -239,61 +312,121 @@ const DashboardAnalytics = ({ tasks }) => {
         ) : (
           <p className="text-gray-500">No tasks to display performance.</p>
         )}
+      </div>
 
-        {/* 🔹 Progress Bars with Completed Task Due Dates */}
-        <div className="mt-10">
-          <h3 className="text-lg font-semibold mb-3">📈 Employee Progress</h3>
-          <div className="space-y-4">
-            {chartData.map((data) => {
-              const total = data.Completed + data.Delayed;
-              const percent = total ? Math.round((data.Completed / total) * 100) : 0;
+      <div className="bg-white p-6 rounded-2xl shadow w-full">
+        <div className="grid lg:grid-cols-2 gap-8">
+          <div>
+            <h3 className="text-lg font-semibold mb-3">📈 Employee Progress</h3>
+            <div className="space-y-4 max-h-[28rem] overflow-auto pr-1">
+              {chartData.map((data) => {
+                const completedCount = data.Completed || 0;
+                const delayedCount = data.Delayed || 0;
+                const inProcessCount = data.InProcess || 0;
+                const total =
+                  typeof data.Total === "number"
+                    ? data.Total
+                    : completedCount + delayedCount + inProcessCount;
+                const percent = total ? Math.round((completedCount / total) * 100) : 0;
+                const completedDueDates = filteredTasks
+                  .filter(
+                    (t) =>
+                      canonicalStatus(t.status) === "completed" &&
+                      (t.assignedEmail || t.assignedTo || "Unknown") === data.name &&
+                      t.dueDate
+                  )
+                  .map((t) =>
+                    t.dueDate?.seconds
+                      ? new Date(t.dueDate.seconds * 1000).toLocaleDateString()
+                      : new Date(t.dueDate).toLocaleDateString()
+                  )
+                  .slice(0, 3);
 
-              // 🆕 Get completed tasks' due dates for this employee
-              const completedDueDates = filteredTasks
-                .filter(
-                  (t) =>
-                    canonicalStatus(t.status) === "completed" &&
-                    t.assignedEmail === data.name &&
-                    t.dueDate
-                )
-                .map((t) =>
-                  t.dueDate?.seconds
-                    ? new Date(t.dueDate.seconds * 1000)
-                    : new Date(t.dueDate)
-                )
-                .sort((a, b) => a - b)
-                .map((d) => d.toLocaleDateString());
-
-              return (
-                <div key={data.name} className="pb-3 border-b border-gray-100">
-                  <p className="text-sm mb-1 text-gray-700 flex justify-between">
-                    <span>{data.name}</span>
-                    <span className="text-xs text-gray-500">
-                      🗓 Next Due: {data.NextDue}
-                    </span>
-                  </p>
-
-                  <div className="w-full bg-gray-200 rounded-full h-3">
-                    <div
-                      className="bg-green-500 h-3 rounded-full transition-all duration-300"
-                      style={{ width: `${percent}%` }}
-                    ></div>
+                return (
+                  <div key={data.name} className="bg-gray-50 rounded-xl p-4 shadow-sm">
+                    <div className="flex items-center justify-between mb-2">
+                      <div>
+                        <p className="font-semibold text-gray-800 text-sm">{data.name}</p>
+                        <p className="text-xs text-gray-500">Next due: {data.NextDue}</p>
+                      </div>
+                      <span className="text-sm font-semibold text-indigo-600">{percent}%</span>
+                    </div>
+                    <div className="w-full bg-gray-200 rounded-full h-2">
+                      <div className="bg-green-500 h-2 rounded-full" style={{ width: `${percent}%` }}></div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-[11px] text-gray-600 mt-3">
+                      <p className="flex items-center justify-between">
+                        <span>Total</span>
+                        <span className="font-semibold text-gray-800">{total}</span>
+                      </p>
+                      <p className="flex items-center justify-between">
+                        <span>Completed</span>
+                        <span className="font-semibold text-gray-800">{completedCount}</span>
+                      </p>
+                      <p className="flex items-center justify-between">
+                        <span>In Process</span>
+                        <span className="font-semibold text-gray-800">{inProcessCount}</span>
+                      </p>
+                      <p className="flex items-center justify-between">
+                        <span>Delayed</span>
+                        <span className="font-semibold text-gray-800">{delayedCount}</span>
+                      </p>
+                    </div>
+                    {completedDueDates.length > 0 && (
+                      <p className="text-[11px] text-gray-500 mt-2">Recent completions: {completedDueDates.join(", ")}</p>
+                    )}
                   </div>
-
-                  <p className="text-xs text-gray-500 mt-1">
-                    ✅ {data.Completed}/{total} completed ({percent}%) — ⏳ Delayed: {data.Delayed} — ⚠️ {data.Overdue} overdue
-                  </p>
-
-                  {/* 🆕 Show completed task due dates */}
-                  {completedDueDates.length > 0 && (
-                    <p className="text-xs text-gray-400 mt-1">
-                      📅 Completed task due dates:{" "}
-                      {completedDueDates.join(", ")}
-                    </p>
-                  )}
+                );
+              })}
+              {chartData.length === 0 && (
+                <p className="text-sm text-gray-500">No employee progress data available for this selection.</p>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-col gap-4">
+            <div className="h-80">
+              {pieChartData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      dataKey="value"
+                      data={pieChartData}
+                      innerRadius={70}
+                      outerRadius={120}
+                      paddingAngle={2}
+                      label={({ name, percent }) => `${name} (${Math.round(percent * 100)}%)`}
+                    >
+                      {pieChartData.map((entry, idx) => (
+                        <Cell key={`status-slice-${entry.name}`} fill={pieColors[idx % pieColors.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip />
+                    <Legend />
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-full flex items-center justify-center text-gray-500">
+                  <p>No status distribution data available.</p>
                 </div>
-              );
-            })}
+              )}
+            </div>
+            <div className="bg-gray-50 rounded-xl p-4 shadow-inner">
+              <h4 className="text-sm font-semibold mb-3">Related Task</h4>
+              <div className="space-y-2 max-h-48 overflow-auto">
+                {relatedTaskEntries.length > 0 ? (
+                  relatedTaskEntries.map((task) => (
+                    <div key={task.id} className="p-2 border rounded text-sm bg-white">
+                      <div className="font-medium text-gray-800 truncate">{task.title || "Untitled"}</div>
+                      <div className="text-xs text-gray-500">
+                        {(task.assignedName || task.assignedEmail || "Unassigned").toString()} • {formatTaskDate(task.endDate || task.dueDate)}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-xs text-gray-500">No tasks available.</p>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </div>
