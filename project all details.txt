@@ -1,0 +1,32 @@
+Task-Management Project — 700-Word Technical Brief
+==================================================
+
+1. Purpose & Context
+Task-Management is a dual-portal workforce coordination platform combining an administrator control center and an employee workspace inside one Next.js repository. Production routing lives under /pages; legacy App Router experiments sit in legacy/app-old and public/task-management-admin for reference only. Markdown guides at the repo root chronicle fixes, verification checklists, and deployment steps, so this document can orient another AI maintainer quickly.
+
+2. Core Stack & Build Pipeline
+The app runs on Next.js 16 with React 19.2, styled through TailwindCSS 4 utilities, custom CSS modules, and the global stylesheet injected by pages/_app.js. Recharts powers administrative analytics. package.json scripts provide npm run dev, build, start, and lint, while ESLint 9 plus eslint-config-next and Tailwind/PostCSS configs enforce standards. Optional dependencies Papaparse and XLSX support spreadsheet driven bulk imports, and verify-setup.sh with verify-firebase-config.sh confirm environment readiness.
+
+3. Navigation & UI Surfaces
+Routing is deliberate: pages/index.js inspects authentication context and sends admins to /admin/dashboard while employees land on /employee/tasks. pages/login.js and pages/firebase-login.js wrap Firebase Email/Password flows. pages/admin/dashboard.js hosts tables, charts, filters, bulk upload actions, KPI editors, and log panels; pages/admin/index.js simply funnels traffic there. pages/employee/index.js summarizes workload metrics, pages/employee/tasks.js handles status updates, and pages/tasks/index.js exposes the full catalogue.
+
+4. Firebase Configuration & Data Model
+firebaseConfig.js initializes the client SDK using NEXT_PUBLIC_FIREBASE_* variables, exports auth, db, and storage handles, and defends against duplicate initialization via getApps. Firestore operates in native mode with five primary collections: tasks for assignment metadata, users for role aware profiles, assignments for progress snapshots, activityLogs for audit trails, and kpi for monthly performance scores named with deterministic composite IDs. Cloud Storage already targets the configured bucket for future attachments, and firebase-admin can backstop server-side token checks if needed.
+
+5. Service Layer Responsibilities
+firebaseService.js centralizes data access. tasksService handles CRUD, employee filters, status filters, timestamp stamping, and writeBatch bulk creation. usersService mirrors that approach, defaulting new entries to role "employee" and supporting id or email lookups. assignmentsService tracks progress separate from tasks, activityLogsService appends chronological events, and kpiService locks one score per user per month so analytics stay deterministic.
+
+6. API Surface & Middleware
+Next.js API routes under pages/api forward browser requests to the services: pages/api/tasks.js covers GET, POST, PUT, and DELETE while logging each mutation, and pages/api/users.js mirrors those verbs but omits sensitive fields. Admin automation resides in pages/api/admin/bulkTasks.js, bulkUsers.js, and deleteUser.js for CSV or XLSX imports plus cascading deletes, while employee dashboards call pages/api/employee endpoints. middlewareHelpers.js enforces Authorization headers, admin checks, sanitization, validation, rate limits, and consistent error handling.
+
+7. Authentication & Authorization Flow
+authHelper.js wraps Firebase Auth primitives. signup uses createUserWithEmailAndPassword, updates the displayName, and writes a Firestore users/{uid} document containing role, department, phone, and timestamps. signin merges Firebase Auth details with the corresponding Firestore profile so every session exposes role data. getCurrentUser subscribes to onAuthStateChanged and resolves a hydrated object. AuthProvider in context/AuthContext.js stores the user payload, loading, and error flags, exposes signin/signup/signout helpers, and computes convenience booleans like isAdmin and isAuthenticated.
+
+8. Frontend Experience & State Management
+pages/_app.js registers AuthProvider globally so components call useAuthContext for identity, role checks, and auth actions. Admin dashboard widgets fetch via hooks that hit the API routes, feeding Recharts visualizations and Tailwind tables with priority, status, owner, and due-date filters. Employee pages emphasize inline status toggles, due date badges, KPI streak indicators, and toast feedback after each mutation.
+
+9. Operations, Tooling, and Security
+.env.local stores runtime keys, with .env.example documenting every NEXT_PUBLIC_FIREBASE_* variable. next.config.mjs enforces strict mode and trusted domains; jsconfig.json sets aliases; eslint.config.mjs, postcss.config.mjs, firebase.json, and firestoreRules.rules cover linting, styling, and rule deployment. verify-setup.sh plus verify-firebase-config.sh confirm node health and Firebase reachability. Recommended checks: run npm run lint, sign in as both roles, create tasks, confirm Firestore writes, and review activity logs; the published Firestore rules enforce the same guardrails.
+
+10. Documentation & Expansion Roadmap
+FILES_SUMMARY.md, IMPLEMENTATION_COMPLETE.md, QUICK_START.md, FIREBASE_SETUP.md, FIREBASE_INTEGRATION_GUIDE.md, FINAL_STATUS_REPORT.md, VERIFICATION_CHECKLIST.md, and companion notes remain the canonical narrative; this page condenses their essentials. Overall, future upgrades include onSnapshot driven real-time updates, Firebase Storage attachments, richer roles such as manager or auditor, outbound email or push notifications, scheduled Cloud Functions for KPI generation, polished analytics visuals, and an eventual migration to the Next.js App Router once parity and regression coverage are secured.

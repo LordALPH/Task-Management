@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db } from "../lib/FirebaseClient";
 import {
@@ -91,17 +91,6 @@ const ATTENDANCE_STATUS_ORDER = ["present", "outdoor", "shortLeave", "absent", "
 const INLINE_STATUS_OPTIONS = ["pending", "in process", "completed", "delayed", "cancelled"];
 const INLINE_PRIORITY_OPTIONS = ["high", "medium", "low"];
 
-const createInlineRow = () => ({
-  id: `inline-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-  title: "",
-  startDate: "",
-  endDate: "",
-  status: "pending",
-  priority: "medium",
-});
-
-const buildInitialInlineRows = () => Array.from({ length: 5 }, () => createInlineRow());
-
 const normalizeDateInputString = (value) => {
   if (!value) return "";
   const trimmed = value.toString().trim();
@@ -133,6 +122,88 @@ const sanitizeInlinePriority = (value) => {
   return "medium";
 };
 
+const SMART_SHEET_COLUMNS = [
+  { key: "title", label: "Title", placeholder: "Homepage revamp", required: true },
+  { key: "description", label: "Description", placeholder: "Optional notes", required: false },
+  { key: "priority", label: "Priority", placeholder: "High / Medium / Low", required: false },
+  { key: "status", label: "Status", placeholder: "Pending / In process", required: false },
+  { key: "startDate", label: "Start Date", placeholder: "YYYY-MM-DD", required: false },
+  { key: "endDate", label: "End Date", placeholder: "YYYY-MM-DD", required: false },
+];
+
+const createEmptySmartRow = () => ({
+  title: "",
+  description: "",
+  priority: "medium",
+  status: "pending",
+  startDate: "",
+  endDate: "",
+});
+
+const buildSmartSheetRows = (count = 10) => Array.from({ length: count }, () => createEmptySmartRow());
+
+const isSmartRowEmpty = (row = {}) => (
+  !row.title?.trim() &&
+  !row.description?.trim() &&
+  !row.priority?.trim() &&
+  !row.status?.trim() &&
+  !row.startDate?.trim() &&
+  !row.endDate?.trim()
+);
+
+const tryParseSmartDate = (value) => {
+  if (!value) return null;
+  const normalized = normalizeDateInputString(value);
+  if (!normalized) return null;
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) return null;
+  parsed.setHours(0, 0, 0, 0);
+  return parsed;
+};
+
+const parseSmartSheetText = (text) => {
+  if (!text) return [];
+  const rows = text
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => line.split(/\t/).map((cell) => cell.trim()));
+  if (!rows.length) return [];
+
+  const headerCells = rows[0].map((cell) => cell.toLowerCase());
+  const headerMatch = SMART_SHEET_COLUMNS.every((col, idx) => {
+    const headerCell = headerCells[idx] || "";
+    return headerCell.includes(col.label.toLowerCase()) || headerCell === col.key.toLowerCase();
+  });
+  if (headerMatch) {
+    rows.shift();
+  }
+
+  return rows
+    .map((cols) => ({
+      title: cols[0] || "",
+      description: cols[1] || "",
+      priority: sanitizeInlinePriority(cols[2] || ""),
+      status: sanitizeInlineStatus(cols[3] || ""),
+      startDate: normalizeDateInputString(cols[4]) || "",
+      endDate: normalizeDateInputString(cols[5]) || "",
+    }))
+    .filter((row) => Object.values(row).some((value) => (typeof value === "string" ? value.trim() : value)));
+};
+
+const getSmartRowIssues = (row) => {
+  const issues = [];
+  if (isSmartRowEmpty(row)) return issues;
+  if (!row.title?.trim()) issues.push("Add a title");
+  const startDate = row.startDate ? tryParseSmartDate(row.startDate) : null;
+  const endDate = row.endDate ? tryParseSmartDate(row.endDate) : null;
+  if (row.startDate && !startDate) issues.push("Start date invalid");
+  if (row.endDate && !endDate) issues.push("End date invalid");
+  if (startDate && endDate && startDate.getTime() > endDate.getTime()) {
+    issues.push("Start date after end date");
+  }
+  return issues;
+};
+
 export default function AdminDashboard() {
   const router = useRouter();
   const getTodayISO = () => {
@@ -159,11 +230,12 @@ export default function AdminDashboard() {
   const [showAddTaskPanel, setShowAddTaskPanel] = useState(false);
   // Bulk import panel state
   const [showBulkPanel, setShowBulkPanel] = useState(false);
-  const [bulkFile, setBulkFile] = useState(null);
   const [bulkAssignedUserId, setBulkAssignedUserId] = useState("");
-  const [bulkAssignedEmail, setBulkAssignedEmail] = useState("");
-  const [bulkUploading, setBulkUploading] = useState(false);
-  const [bulkResult, setBulkResult] = useState(null);
+  const [smartBulkRows, setSmartBulkRows] = useState(() => buildSmartSheetRows());
+  const [smartBulkError, setSmartBulkError] = useState("");
+  const [smartPasteSummary, setSmartPasteSummary] = useState("");
+  const [smartBulkProcessing, setSmartBulkProcessing] = useState(false);
+  const smartPasteInputRef = useRef(null);
   // Bulk user import state
   const [showBulkUserPanel, setShowBulkUserPanel] = useState(false);
   const [bulkUserFile, setBulkUserFile] = useState(null);
@@ -172,8 +244,6 @@ export default function AdminDashboard() {
   // Members search
   const [userSearch, setUserSearch] = useState("");
   // preview / confirm states for bulk operations
-  const [bulkPreviewRows, setBulkPreviewRows] = useState(null);
-  const [showBulkPreview, setShowBulkPreview] = useState(false);
   const [bulkUserPreviewRows, setBulkUserPreviewRows] = useState(null);
   const [showBulkUserPreview, setShowBulkUserPreview] = useState(false);
 
@@ -189,11 +259,10 @@ export default function AdminDashboard() {
   const [activeView, setActiveView] = useState("progress");
   const [filterName, setFilterName] = useState("");
   const [selectedStatuses, setSelectedStatuses] = useState(new Set(["all"]));
+  const [taskFilterStartDate, setTaskFilterStartDate] = useState("");
+  const [taskFilterEndDate, setTaskFilterEndDate] = useState("");
   const [performanceStartDate, setPerformanceStartDate] = useState("");
   const [performanceEndDate, setPerformanceEndDate] = useState("");
-  const [bulkEntryMode, setBulkEntryMode] = useState("file");
-  const [inlineBulkRows, setInlineBulkRows] = useState(() => buildInitialInlineRows());
-  const [inlinePasteValue, setInlinePasteValue] = useState("");
 
   // actual status map (editable boxes per task)
   const [actualStatusMap, setActualStatusMap] = useState({});
@@ -269,6 +338,7 @@ export default function AdminDashboard() {
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const [selectedAttendanceDate, setSelectedAttendanceDate] = useState(() => getTodayISO());
   const [savingAttendanceKey, setSavingAttendanceKey] = useState("");
+  const [selectedAttendanceMemberId, setSelectedAttendanceMemberId] = useState("");
   // Bulk attendance state
   const [bulkAttendanceDate, setBulkAttendanceDate] = useState("");
   const [bulkAttendanceAction, setBulkAttendanceAction] = useState("present");
@@ -435,113 +505,183 @@ export default function AdminDashboard() {
     return date;
   };
 
-  const resetInlineSheet = () => {
-    setInlineBulkRows(buildInitialInlineRows());
-    setInlinePasteValue("");
-  };
-
-  const resetBulkPanelInputs = () => {
-    setBulkFile(null);
-    setBulkAssignedUserId("");
-    setBulkAssignedEmail("");
-    setBulkPreviewRows(null);
-    setShowBulkPreview(false);
-    setBulkEntryMode("file");
-    resetInlineSheet();
+  const resetSmartBulkPanel = ({ preserveAssignee = false } = {}) => {
+    setSmartBulkRows(buildSmartSheetRows());
+    setSmartPasteSummary("");
+    setSmartBulkError("");
+    setSmartBulkProcessing(false);
+    if (!preserveAssignee) {
+      setBulkAssignedUserId("");
+    }
+    if (smartPasteInputRef.current) {
+      smartPasteInputRef.current.value = "";
+    }
   };
 
   const closeBulkPanel = () => {
     setShowBulkPanel(false);
-    resetBulkPanelInputs();
+    resetSmartBulkPanel();
   };
 
-  const updateInlineRow = (rowId, field, value) => {
-    setInlineBulkRows((prev) => prev.map((row) => (row.id === rowId ? { ...row, [field]: value } : row)));
-  };
-
-  const addInlineRows = (count = 1) => {
-    setInlineBulkRows((prev) => [...prev, ...Array.from({ length: count }, () => createInlineRow())]);
-  };
-
-  const removeInlineRow = (rowId) => {
-    setInlineBulkRows((prev) => {
-      if (prev.length === 1) return prev;
-      return prev.filter((row) => row.id !== rowId);
+  const updateSmartRowField = (rowIndex, field, value) => {
+    setSmartBulkRows((prev) => {
+      const next = [...prev];
+      next[rowIndex] = { ...next[rowIndex], [field]: value };
+      return next;
     });
   };
 
-  const handleInlinePasteApply = () => {
-    if (!inlinePasteValue.trim()) {
-      alert("Paste rows into the sheet textbox first.");
-      return;
-    }
-
-    const lines = inlinePasteValue
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-
-    if (lines.length === 0) {
-      alert("No valid rows detected in pasted content.");
-      return;
-    }
-
-    const parsed = lines.map((line) => {
-      const parts = line.split(/\t|,/).map((part) => part.trim());
-      const [title, start, end, status, priority] = parts;
-      const base = createInlineRow();
-      return {
-        ...base,
-        title: title || "",
-        startDate: normalizeDateInputString(start) || "",
-        endDate: normalizeDateInputString(end) || "",
-        status: sanitizeInlineStatus(status),
-        priority: sanitizeInlinePriority(priority),
-      };
-    });
-
-    setInlineBulkRows(parsed.length ? parsed : buildInitialInlineRows());
-    setInlinePasteValue("");
+  const addSmartRows = (count = 5) => {
+    setSmartBulkRows((prev) => [...prev, ...Array.from({ length: count }, () => createEmptySmartRow())]);
   };
 
-  const handleInlinePreview = () => {
-    if (!bulkAssignedUserId && !bulkAssignedEmail) {
-      alert("Choose or enter an assignee before previewing.");
+  const removeSmartRow = (rowIndex) => {
+    setSmartBulkRows((prev) => {
+      if (prev.length === 1) {
+        return [createEmptySmartRow()];
+      }
+      return prev.filter((_, idx) => idx !== rowIndex);
+    });
+  };
+
+  const clearSmartRows = () => {
+    setSmartBulkRows(buildSmartSheetRows());
+    setSmartPasteSummary("");
+    setSmartBulkError("");
+  };
+
+  const triggerSmartPaste = () => {
+    if (smartPasteInputRef.current) {
+      smartPasteInputRef.current.value = "";
+      smartPasteInputRef.current.focus();
+    }
+  };
+
+  const handleSmartPaste = (event) => {
+    const text = event.clipboardData?.getData("text/plain");
+    if (!text) return;
+    event.preventDefault();
+    const parsedRows = parseSmartSheetText(text);
+    if (!parsedRows.length) {
+      setSmartPasteSummary("No tabular data detected. Copy rows from Excel first.");
       return;
     }
 
-    const rows = inlineBulkRows
-      .map((row) => ({
+    setSmartBulkRows((prev) => {
+      const next = [...prev];
+      let insertIndex = next.findIndex((row) => isSmartRowEmpty(row));
+      if (insertIndex === -1) insertIndex = next.length;
+
+      parsedRows.forEach((row, offset) => {
+        const targetIndex = insertIndex + offset;
+        if (!next[targetIndex]) {
+          next[targetIndex] = createEmptySmartRow();
+        }
+        next[targetIndex] = { ...next[targetIndex], ...row };
+      });
+      return next;
+    });
+
+    setSmartPasteSummary(`Loaded ${parsedRows.length} task row${parsedRows.length === 1 ? "" : "s"} from clipboard.`);
+    setSmartBulkError("");
+  };
+
+  const handleSmartBulkUpload = async () => {
+    if (!bulkAssignedUserId) {
+      setSmartBulkError("Select the employee who should receive these tasks.");
+      return;
+    }
+
+    const targetUser = users.find((member) => (member.id === bulkAssignedUserId) || (member.uid === bulkAssignedUserId));
+    if (!targetUser) {
+      setSmartBulkError("Selected employee is no longer available. Refresh and try again.");
+      return;
+    }
+
+    const preparedRows = [];
+    const rowErrors = [];
+
+    smartBulkRows.forEach((row, index) => {
+      if (isSmartRowEmpty(row)) return;
+      const rowNumber = index + 1;
+      if (!row.title?.trim()) {
+        rowErrors.push(`Row ${rowNumber}: Add a title.`);
+        return;
+      }
+
+      const normalizedStart = row.startDate ? normalizeDateInputString(row.startDate) : "";
+      const normalizedEnd = row.endDate ? normalizeDateInputString(row.endDate) : "";
+      if (row.startDate && !normalizedStart) {
+        rowErrors.push(`Row ${rowNumber}: Invalid start date.`);
+        return;
+      }
+      if (row.endDate && !normalizedEnd) {
+        rowErrors.push(`Row ${rowNumber}: Invalid end date.`);
+        return;
+      }
+      if (normalizedStart && normalizedEnd && new Date(normalizedStart) > new Date(normalizedEnd)) {
+        rowErrors.push(`Row ${rowNumber}: Start date cannot be after end date.`);
+        return;
+      }
+
+      preparedRows.push({
         title: row.title.trim(),
-        startDate: row.startDate || null,
-        endDate: row.endDate || null,
-        status: sanitizeInlineStatus(row.status),
+        description: row.description?.trim() || "",
         priority: sanitizeInlinePriority(row.priority),
-      }))
-      .filter((row) => row.title);
+        status: sanitizeInlineStatus(row.status),
+        startDate: normalizedStart || null,
+        endDate: normalizedEnd || null,
+        actualStatus: "",
+        assignedTo: bulkAssignedUserId,
+        assignedEmail: targetUser.email || "",
+        assignedName: targetUser.name || targetUser.displayName || targetUser.email || "",
+      });
+    });
 
-    if (rows.length === 0) {
-      alert("Add at least one task title before previewing.");
+    if (!preparedRows.length) {
+      setSmartBulkError("Add at least one task row with a title before uploading.");
       return;
     }
 
-    const invalidRow = rows.find((row) => row.startDate && row.endDate && new Date(row.startDate) > new Date(row.endDate));
-    if (invalidRow) {
-      alert(`Start date cannot be after end date for "${invalidRow.title}".`);
+    if (rowErrors.length) {
+      setSmartBulkError(rowErrors.join("\n"));
       return;
     }
 
-    setBulkPreviewRows(rows);
-    setShowBulkPreview(true);
-  };
-
-  const handleBulkEntryModeChange = (mode) => {
-    if (mode === bulkEntryMode) return;
-    setBulkEntryMode(mode);
-    if (mode === "sheet") {
-      setBulkFile(null);
+    setSmartBulkProcessing(true);
+    setSmartBulkError("");
+    try {
+      const response = await fetch("/api/admin/bulkTasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tasks: preparedRows }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Upload failed");
+      }
+      alert(`Created ${data.count || preparedRows.length} tasks.`);
+      resetSmartBulkPanel({ preserveAssignee: true });
+      setShowBulkPanel(false);
+    } catch (err) {
+      console.error("Smart bulk upload failed:", err);
+      setSmartBulkError(err.message || "Failed to create tasks.");
+    } finally {
+      setSmartBulkProcessing(false);
     }
   };
+
+  const smartBulkAssignee = useMemo(
+    () => users.find((member) => (member.id === bulkAssignedUserId) || (member.uid === bulkAssignedUserId)) || null,
+    [users, bulkAssignedUserId]
+  );
+
+  const smartRowIssueMap = useMemo(() => smartBulkRows.map(getSmartRowIssues), [smartBulkRows]);
+
+  const smartReadyCount = useMemo(
+    () => smartBulkRows.reduce((count, row, idx) => (!isSmartRowEmpty(row) && smartRowIssueMap[idx].length === 0 ? count + 1 : count), 0),
+    [smartBulkRows, smartRowIssueMap]
+  );
 
   // normalize status strings and map to canonical set
   const normalize = (s) => (s || "").toString().toLowerCase().trim();
@@ -1042,6 +1182,37 @@ export default function AdminDashboard() {
       };
     });
   }, [users, calculateAttendanceMetrics]);
+
+  const selectedAttendanceDetails = useMemo(() => {
+    if (!selectedAttendanceMemberId) return null;
+    const member = users.find((u) => (u.uid || u.id) === selectedAttendanceMemberId);
+    const days = generateCalendarDays(currentMonth, currentYear);
+    const records = days
+      .map((day) => {
+        const key = `${selectedAttendanceMemberId}_${day.fullDate}`;
+        const status = attendanceData[key];
+        if (!status) return null;
+        return { dateKey: day.fullDate, status };
+      })
+      .filter(Boolean);
+    const metrics = calculateAttendanceMetrics(selectedAttendanceMemberId);
+
+    return {
+      uid: selectedAttendanceMemberId,
+      name: member?.name || member?.displayName || member?.email || "Member",
+      records,
+      totalMarked: records.length,
+      metrics,
+    };
+  }, [
+    selectedAttendanceMemberId,
+    users,
+    attendanceData,
+    currentMonth,
+    currentYear,
+    generateCalendarDays,
+    calculateAttendanceMetrics,
+  ]);
 
   // 🔹 Add Task (assign by dropdown or email + start & end dates + priority)
   const addTask = async (e) => {
@@ -1585,7 +1756,18 @@ export default function AdminDashboard() {
     });
 
     if (reminderView === "due") {
-      return list.filter((r) => r.endDate && r.daysLeft !== null && r.daysLeft <= 3 && r.daysLeft >= 0).sort((a,b)=>a.daysLeft-b.daysLeft);
+      return list
+        .filter((r) => {
+          const status = canonicalStatus(r.status);
+          return (
+            r.endDate &&
+            r.daysLeft !== null &&
+            r.daysLeft <= 3 &&
+            r.daysLeft >= 0 &&
+            (status === "in process" || status === "delayed")
+          );
+        })
+        .sort((a, b) => a.daysLeft - b.daysLeft);
     }
 
     if (reminderView === "delayed") {
@@ -1763,13 +1945,13 @@ export default function AdminDashboard() {
               </div>
               <p className="mb-1">Quick Actions</p>
                 <div className="flex flex-col gap-2">
-                <button onClick={() => { setShowDeleteUsers((s) => !s); }} className="text-sm px-3 py-2 rounded bg-white/6">Toggle Delete Users</button>
-                <button onClick={() => { setShowDeleteTasks((s) => !s); }} className="text-sm px-3 py-2 rounded bg-white/6">Toggle Delete Tasks</button>
-                <button onClick={() => { setShowAddEmployeePanel((s) => !s); setShowAddTaskPanel(false); setShowBulkPanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6">Add Employee</button>
-                <button onClick={() => { setShowAddTaskPanel((s) => !s); setShowAddEmployeePanel(false); setShowBulkPanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6">Add Task</button>
-                <button onClick={() => { setShowBulkPanel((s) => !s); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6">Bulk Add Tasks</button>
-                <button onClick={() => { setShowBulkUserPanel((s) => !s); setShowBulkPanel(false); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6">Bulk Add Users</button>
-                <button onClick={() => { setShowApprovalsPanel((s) => !s); setShowBulkUserPanel(false); setShowBulkPanel(false); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6">Approvals</button>
+                <button onClick={() => { setShowDeleteUsers((s) => !s); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Toggle Delete Users</button>
+                <button onClick={() => { setShowDeleteTasks((s) => !s); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Toggle Delete Tasks</button>
+                <button onClick={() => { setShowAddEmployeePanel((s) => !s); setShowAddTaskPanel(false); setShowBulkPanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Add Employee</button>
+                <button onClick={() => { setShowAddTaskPanel((s) => !s); setShowAddEmployeePanel(false); setShowBulkPanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Add Task</button>
+                <button onClick={() => { setShowBulkPanel((s) => !s); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Bulk Add Tasks</button>
+                <button onClick={() => { setShowBulkUserPanel((s) => !s); setShowBulkPanel(false); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Bulk Add Users</button>
+                <button onClick={() => { setShowApprovalsPanel((s) => !s); setShowBulkUserPanel(false); setShowBulkPanel(false); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Approvals</button>
               </div>
             </div>
           </div>
@@ -1999,41 +2181,114 @@ export default function AdminDashboard() {
                       {attendanceSummaries.length === 0 ? (
                         <div className="text-sm text-gray-500">No attendance records captured for this month yet.</div>
                       ) : (
+                        <>
                         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                          {attendanceSummaries.map((summary) => (
-                            <div key={summary.uid} className="border rounded-lg p-4 bg-white shadow-sm">
-                              <div>
-                                <p className="font-semibold text-gray-800">{summary.name}</p>
-                                <p className="text-xs text-gray-500">Monthly attendance summary</p>
+                          {attendanceSummaries.map((summary) => {
+                            const isSelected = summary.uid === selectedAttendanceMemberId;
+                            return (
+                              <button
+                                key={summary.uid}
+                                type="button"
+                                onClick={() => setSelectedAttendanceMemberId((prev) => (prev === summary.uid ? "" : summary.uid))}
+                                className={`text-left border rounded-lg p-4 shadow-sm transition cursor-pointer ${
+                                  isSelected ? "border-blue-500 bg-blue-50 ring-2 ring-blue-200" : "bg-white hover:border-blue-200"
+                                }`}
+                              >
+                                <div>
+                                  <p className="font-semibold text-gray-800">{summary.name}</p>
+                                  <p className="text-xs text-gray-500">Monthly attendance summary</p>
+                                </div>
+                                <div className="mt-4 grid grid-cols-2 gap-3 text-xs sm:text-sm">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-gray-500">Present</span>
+                                    <span className="font-semibold text-gray-800">{summary.present}</span>
+                                  </div>
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-gray-500">Outdoor</span>
+                                    <span className="font-semibold text-gray-800">{summary.outdoor}</span>
+                                  </div>
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-gray-500">Short leaves</span>
+                                    <span className="font-semibold text-gray-800">{summary.shortLeave}</span>
+                                  </div>
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-gray-500">Absents</span>
+                                    <span className="font-semibold text-gray-800">{summary.absent}</span>
+                                  </div>
+                                </div>
+                                <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between">
+                                  <span className="text-xs uppercase tracking-wide text-gray-500">Attendance %</span>
+                                  <span className="text-lg font-bold text-blue-600">{toOneDecimal(summary.percentage)}%</span>
+                                </div>
+                                {summary.off > 0 && (
+                                  <div className="mt-2 text-[11px] text-gray-400">Off days excluded: {summary.off}</div>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="mt-4">
+                          {selectedAttendanceDetails ? (
+                            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                <div>
+                                  <p className="font-semibold text-blue-900">{selectedAttendanceDetails.name}</p>
+                                  <p className="text-sm text-blue-700">Marked days this month: {selectedAttendanceDetails.totalMarked}</p>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedAttendanceMemberId("")}
+                                  className="text-xs px-3 py-1 rounded bg-white border border-blue-200 text-blue-700 hover:bg-blue-100"
+                                >
+                                  Clear selection
+                                </button>
                               </div>
-                              <div className="mt-4 grid grid-cols-2 gap-3 text-xs sm:text-sm">
+                              <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs sm:text-sm">
                                 <div className="flex items-center justify-between">
                                   <span className="text-gray-500">Present</span>
-                                  <span className="font-semibold text-gray-800">{summary.present}</span>
+                                  <span className="font-semibold text-gray-800">{selectedAttendanceDetails.metrics?.present ?? 0}</span>
                                 </div>
                                 <div className="flex items-center justify-between">
                                   <span className="text-gray-500">Outdoor</span>
-                                  <span className="font-semibold text-gray-800">{summary.outdoor}</span>
+                                  <span className="font-semibold text-gray-800">{selectedAttendanceDetails.metrics?.outdoor ?? 0}</span>
                                 </div>
                                 <div className="flex items-center justify-between">
                                   <span className="text-gray-500">Short leaves</span>
-                                  <span className="font-semibold text-gray-800">{summary.shortLeave}</span>
+                                  <span className="font-semibold text-gray-800">{selectedAttendanceDetails.metrics?.shortLeave ?? 0}</span>
                                 </div>
                                 <div className="flex items-center justify-between">
                                   <span className="text-gray-500">Absents</span>
-                                  <span className="font-semibold text-gray-800">{summary.absent}</span>
+                                  <span className="font-semibold text-gray-800">{selectedAttendanceDetails.metrics?.absent ?? 0}</span>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-gray-500">Attendance %</span>
+                                  <span className="font-semibold text-blue-700">{toOneDecimal(selectedAttendanceDetails.metrics?.percentage ?? 0)}%</span>
                                 </div>
                               </div>
-                              <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between">
-                                <span className="text-xs uppercase tracking-wide text-gray-500">Attendance %</span>
-                                <span className="text-lg font-bold text-blue-600">{toOneDecimal(summary.percentage)}%</span>
+                              <div className="mt-4 bg-white border border-blue-100 rounded-lg max-h-48 overflow-auto">
+                                {selectedAttendanceDetails.records.length === 0 ? (
+                                  <p className="text-sm text-gray-500 p-3">No attendance entries recorded for this member in the selected month.</p>
+                                ) : (
+                                  <ul className="divide-y">
+                                    {selectedAttendanceDetails.records.map((record) => {
+                                      const config = ATTENDANCE_STATUS_CONFIG[record.status] || {};
+                                      const badgeClass = config.badgeClass || "bg-gray-100 text-gray-600";
+                                      return (
+                                        <li key={`${record.dateKey}-${record.status}`} className="flex items-center justify-between px-3 py-2 text-xs sm:text-sm">
+                                          <span className="text-gray-600">{formatDate(record.dateKey)}</span>
+                                          <span className={`px-2 py-1 rounded ${badgeClass}`}>{config.label || record.status}</span>
+                                        </li>
+                                      );
+                                    })}
+                                  </ul>
+                                )}
                               </div>
-                              {summary.off > 0 && (
-                                <div className="mt-2 text-[11px] text-gray-400">Off days excluded: {summary.off}</div>
-                              )}
                             </div>
-                          ))}
+                          ) : (
+                            <p className="text-xs text-gray-500">Select a member above to see their exact marked dates for this month.</p>
+                          )}
                         </div>
+                        </>
                       )}
                     </div>
                   </div>
@@ -2522,74 +2777,6 @@ export default function AdminDashboard() {
                   </div>
                 </div>
               )}
-          {/* Bulk Tasks Preview / Confirm */}
-          {showBulkPreview && bulkPreviewRows && (
-            <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/50">
-              <div className="bg-white p-6 rounded-2xl shadow-lg w-[90%] max-w-4xl">
-                <h3 className="text-lg font-semibold mb-3">Preview Tasks ({bulkPreviewRows.length})</h3>
-                <div className="max-h-80 overflow-auto mb-4">
-                  <table className="min-w-full text-sm">
-                    <thead>
-                      <tr className="bg-gray-100">
-                        <th className="p-2 text-left">Title</th>
-                        <th className="p-2 text-left">Start</th>
-                        <th className="p-2 text-left">End</th>
-                        <th className="p-2 text-left">Status</th>
-                        <th className="p-2 text-left">Priority</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {bulkPreviewRows.map((r, idx) => (
-                        <tr key={idx} className="border-b hover:bg-gray-50">
-                          <td className="p-2">{r.title}</td>
-                          <td className="p-2">{r.startDate || '-'}</td>
-                          <td className="p-2">{r.endDate || '-'}</td>
-                          <td className="p-2 capitalize">{r.status || 'pending'}</td>
-                          <td className="p-2 capitalize">{r.priority}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <div className="flex justify-end gap-3">
-                  <button onClick={() => { setShowBulkPreview(false); }} className="bg-gray-100 px-4 py-2 rounded">Back</button>
-                  <button onClick={async () => {
-                    // confirm -> send to server API
-                    setBulkUploading(true);
-                    try {
-                      const tasksToSend = bulkPreviewRows.map((r) => ({
-                        title: r.title,
-                        startDate: r.startDate || null,
-                        endDate: r.endDate || null,
-                        priority: r.priority || 'medium',
-                        status: sanitizeInlineStatus(r.status || 'pending'),
-                        actualStatus: r.actualStatus || '',
-                        assignedTo: bulkAssignedUserId || '',
-                        assignedEmail: bulkAssignedEmail || '',
-                        assignedName: (() => {
-                          const a = users.find(u=> (u.id===bulkAssignedUserId || u.uid===bulkAssignedUserId) || (u.email===bulkAssignedEmail));
-                          return a ? (a.name||'') : '';
-                        })(),
-                      }));
-
-                      const res = await fetch('/api/admin/bulkTasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tasks: tasksToSend }) });
-                      const data = await res.json();
-                      if (!res.ok) throw new Error(data.error || 'Upload failed');
-                      alert(`Created ${data.count || 0} tasks.`);
-                      setShowBulkPreview(false);
-                      closeBulkPanel();
-                    } catch (err) {
-                      console.error(err);
-                      alert('Bulk create failed: ' + (err.message || err));
-                    } finally {
-                      setBulkUploading(false);
-                    }
-                  }} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">Confirm Create</button>
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* Bulk Users Preview / Confirm */}
           {showBulkUserPreview && bulkUserPreviewRows && (
             <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/50">
@@ -2824,224 +3011,153 @@ export default function AdminDashboard() {
           {/* Bulk Add Tasks overlay */}
           {showBulkPanel && (
             <div className="fixed left-72 right-6 top-6 z-50 animate-slide-down">
-              <div className="bg-white p-6 rounded-2xl shadow-lg relative">
+              <div className="bg-white p-6 rounded-2xl shadow-lg relative max-h-[90vh] overflow-y-auto">
                 <div className="absolute right-3 top-3">
                   <button onClick={closeBulkPanel} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
                 </div>
-                <h2 className="text-xl font-semibold mb-4">📥 Bulk Add Tasks</h2>
+                <h2 className="text-xl font-semibold mb-1">🧠 Smart Bulk Task Upload</h2>
+                <p className="text-sm text-gray-500 mb-4">Pick an employee, paste rows directly from Excel (Title → Description → Priority → Status → Start Date → End Date), tweak inline, then upload in one click.</p>
 
-                <div className="mb-3">
-                  <label className="text-sm text-gray-600">Assign all tasks to (choose member)</label>
-                  <select value={bulkAssignedUserId} onChange={(e) => {
-                    const id = e.target.value;
-                    setBulkAssignedUserId(id);
-                    if (id) {
-                      const u = users.find((x) => x.id === id || x.uid === id);
-                      setBulkAssignedEmail(u ? u.email : "");
-                    } else {
-                      setBulkAssignedEmail("");
-                    }
-                  }} className="border p-2 w-full mb-3 rounded appearance-none">
-                    <option value="">-- Select member --</option>
-                    {users.map((u) => (
-                      <option key={u.id} value={u.id}>
-                        {u.name ? `${u.name} (${u.email})` : u.email}
-                      </option>
-                    ))}
-                  </select>
-
-                  <div className="mb-3">
-                    <label className="text-sm text-gray-600">Or enter email</label>
-                    <input
-                      type="email"
-                      placeholder="Employee Email (if not in list)"
-                      className="border p-2 w-full rounded"
-                      value={bulkAssignedEmail}
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div>
+                    <label className="text-sm text-gray-600 font-semibold">Assign every task to</label>
+                    <select
+                      value={bulkAssignedUserId}
                       onChange={(e) => {
-                        setBulkAssignedEmail(e.target.value);
-                        if (bulkAssignedUserId) setBulkAssignedUserId("");
+                        setBulkAssignedUserId(e.target.value);
+                        setSmartBulkError("");
                       }}
-                    />
-                  </div>
-                </div>
-
-                <div className="mb-4">
-                  <label className="text-sm font-semibold text-gray-700">Choose entry mode</label>
-                  <div className="flex flex-wrap gap-2 mt-2">
-                    <button
-                      type="button"
-                      onClick={() => handleBulkEntryModeChange('file')}
-                      className={`px-4 py-2 rounded-lg text-sm font-semibold ${bulkEntryMode === 'file' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700'}`}
+                      className="border p-2 w-full mb-2 rounded appearance-none"
                     >
-                      Upload file
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleBulkEntryModeChange('sheet')}
-                      className={`px-4 py-2 rounded-lg text-sm font-semibold ${bulkEntryMode === 'sheet' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700'}`}
-                    >
-                      Inline sheet (no Excel)
-                    </button>
+                      <option value="">-- Select employee --</option>
+                      {users.map((u) => (
+                        <option key={u.id || u.uid} value={u.id || u.uid}>
+                          {(u.name || u.displayName || u.email) ?? "Unnamed"}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-500">Need someone new? Add them under Members so their name appears here.</p>
                   </div>
-                  <p className="text-xs text-gray-500 mt-1">Select “Inline sheet” to paste tasks directly once a member is chosen.</p>
-                </div>
-
-                {bulkEntryMode === 'file' ? (
-                  <>
-                    <div className="mb-4">
-                      <label className="text-sm text-gray-600">Upload file (.csv or .xlsx)</label>
-                      <input type="file" accept=".csv,.xlsx,.xls" onChange={(e) => setBulkFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)} className="mt-2" />
-                      <div className="text-xs text-gray-500 mt-2">
-                        File must have headers: <code>title</code>, <code>startDate</code>, <code>endDate</code>. Columns <code>priority</code> & <code>status</code> are optional.
-                      </div>
-                    </div>
-
-                    <div className="flex gap-3">
-                      <button onClick={async () => {
-                        // parse and show preview for confirmation
-                        if (!bulkFile) { alert('Please choose a file to upload.'); return; }
-                        if (!bulkAssignedUserId && !bulkAssignedEmail) { alert('Please choose or enter an assignee.'); return; }
-
-                        setBulkUploading(true);
-                        try {
-                          const rows = [];
-                          const name = (bulkFile.name || '').toLowerCase();
-                          if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
-                            const data = await bulkFile.arrayBuffer();
-                            const workbook = XLSX.read(data, { type: 'array' });
-                            const sheetName = workbook.SheetNames[0];
-                            const sheet = workbook.Sheets[sheetName];
-                            const json = XLSX.utils.sheet_to_json(sheet, { defval: '' });
-                            json.forEach((r) => rows.push(r));
-                          } else {
-                            const result = await new Promise((resolve, reject) => {
-                              Papa.parse(bulkFile, {
-                                header: true,
-                                skipEmptyLines: true,
-                                complete: (res) => resolve(res),
-                                error: (err) => reject(err),
-                              });
-                            });
-                            (result.data || []).forEach((r) => rows.push(r));
-                          }
-
-                          if (!rows || rows.length === 0) {
-                            alert('No rows found in file.');
-                            setBulkUploading(false);
-                            return;
-                          }
-
-                          // normalize rows for preview
-                          const normalized = rows.map((r) => {
-                            const keys = Object.keys(r || {});
-                            const norm = {};
-                            keys.forEach((k) => { norm[k.toString().toLowerCase().replace(/\s|_/g,'')] = r[k]; });
-                            const titleVal = norm['title'] || norm['task'] || '';
-                            const sdRaw = norm['startdate'] || norm['start_date'] || '';
-                            const edRaw = norm['enddate'] || norm['end_date'] || '';
-                            const rawStatus = norm['status'] || norm['taskstatus'] || '';
-                            const rawPr = (norm['priority'] || '').toString();
-                            const startDateVal = normalizeDateInputString(sdRaw) || (sdRaw || null);
-                            const endDateVal = normalizeDateInputString(edRaw) || (edRaw || null);
-                            return {
-                              title: titleVal,
-                              startDate: startDateVal,
-                              endDate: endDateVal,
-                              priority: sanitizeInlinePriority(rawPr),
-                              status: sanitizeInlineStatus(rawStatus),
-                            };
-                          }).filter(r=>r.title);
-
-                          if (!normalized || normalized.length === 0) {
-                            alert('No valid task rows found in file. Ensure there is a title column.');
-                            setBulkUploading(false);
-                            return;
-                          }
-
-                          setBulkPreviewRows(normalized);
-                          setShowBulkPreview(true);
-                        } catch (err) {
-                          console.error(err);
-                          alert('Bulk upload parse failed: ' + (err.message || err));
-                        } finally {
-                          setBulkUploading(false);
-                        }
-                      }} disabled={bulkUploading} className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded">Preview</button>
-
-                      <button type="button" onClick={closeBulkPanel} className="bg-gray-100 px-4 py-2 rounded">Cancel</button>
-                    </div>
-                  </>
-                ) : (
-                  <div className="space-y-4">
-                    {(!bulkAssignedUserId && !bulkAssignedEmail) ? (
-                      <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm text-yellow-800">
-                        Select a member or enter an email to unlock the paste-ready sheet.
-                      </div>
+                  <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4 text-sm text-indigo-800">
+                    {smartBulkAssignee ? (
+                      <>
+                        <p className="font-semibold text-indigo-900">Selected member</p>
+                        <p>{smartBulkAssignee.name || smartBulkAssignee.displayName || smartBulkAssignee.email}</p>
+                        <p className="text-xs mt-2">
+                          {smartReadyCount > 0
+                            ? `${smartReadyCount} row${smartReadyCount === 1 ? "" : "s"} ready to assign.`
+                            : "Paste or type at least one row to begin."}
+                        </p>
+                      </>
                     ) : (
                       <>
-                        <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-3 text-sm text-indigo-800">
-                          Paste rows from any spreadsheet (Title, Start Date, End Date, Status, Priority) or type directly into the grid below. Status accepts Pending, In process, Completed, Delayed or Cancelled.
-                        </div>
-                        <div className="overflow-x-auto border rounded-lg">
-                          <table className="min-w-full text-sm">
-                            <thead>
-                              <tr className="bg-gray-100 text-left">
-                                <th className="p-2 text-xs text-gray-500">#</th>
-                                <th className="p-2">Task title</th>
-                                <th className="p-2">Start</th>
-                                <th className="p-2">End</th>
-                                <th className="p-2">Status</th>
-                                <th className="p-2">Priority</th>
-                                <th className="p-2 text-right">Remove</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {inlineBulkRows.map((row, idx) => (
-                                <tr key={row.id} className="border-b">
-                                  <td className="p-2 text-xs text-gray-500">{idx + 1}</td>
-                                  <td className="p-2">
-                                    <input
-                                      type="text"
-                                      value={row.title}
-                                      onChange={(e) => updateInlineRow(row.id, 'title', e.target.value)}
-                                      placeholder="Task title"
-                                      className="w-full border rounded px-2 py-1"
-                                    />
-                                  </td>
-                                  <td className="p-2">
-                                    <input
-                                      type="date"
-                                      value={row.startDate}
-                                      onChange={(e) => updateInlineRow(row.id, 'startDate', e.target.value)}
-                                      className="w-full border rounded px-2 py-1"
-                                    />
-                                  </td>
-                                  <td className="p-2">
-                                    <input
-                                      type="date"
-                                      value={row.endDate}
-                                      onChange={(e) => updateInlineRow(row.id, 'endDate', e.target.value)}
-                                      className="w-full border rounded px-2 py-1"
-                                    />
-                                  </td>
-                                  <td className="p-2">
-                                    <select
-                                      value={row.status}
-                                      onChange={(e) => updateInlineRow(row.id, 'status', e.target.value)}
-                                      className="w-full border rounded px-2 py-1"
-                                    >
-                                      {INLINE_STATUS_OPTIONS.map((status) => (
-                                        <option key={status} value={status}>
-                                          {status.replace(/\b\w/g, (char) => char.toUpperCase())}
-                                        </option>
-                                      ))}
-                                    </select>
-                                  </td>
-                                  <td className="p-2">
+                        <p className="font-semibold text-indigo-900">Step 1: Pick a member</p>
+                        <p>Select whose tasks you are uploading. Every pasted row goes to this person.</p>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-6 grid gap-4 md:grid-cols-2">
+                  <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-4 text-xs text-gray-700">
+                    <p className="font-semibold text-gray-800">Sheet column order</p>
+                    <ol className="mt-2 list-decimal space-y-1 pl-5">
+                      {SMART_SHEET_COLUMNS.map((col) => (
+                        <li key={col.key}>{col.label}</li>
+                      ))}
+                    </ol>
+                    <p className="mt-3 font-mono text-[11px] text-gray-600">
+                      Example → Homepage revamp[TAB]Design final tweaks[TAB]High[TAB]In Process[TAB]2025-01-05[TAB]2025-01-12
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 space-y-3">
+                    <p className="font-semibold text-blue-900">Quick actions</p>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => addSmartRows(5)}
+                        className="rounded-lg border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                      >
+                        + Add 5 rows
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => addSmartRows(1)}
+                        className="rounded-lg border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                      >
+                        + Add row
+                      </button>
+                      <button
+                        type="button"
+                        onClick={clearSmartRows}
+                        className="rounded-lg border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                      >
+                        Clear sheet
+                      </button>
+                    </div>
+                    <p className="text-xs text-blue-900">
+                      Rows filled: {smartBulkRows.filter((row) => !isSmartRowEmpty(row)).length} • Ready rows: {smartReadyCount}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-6">
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Paste rows from Excel</label>
+                  <p className="text-xs text-gray-500 mb-2">Copy cells (same column order) and press <strong>Ctrl/⌘ + V</strong> inside the box. We'll auto-expand the grid.</p>
+                  <textarea
+                    ref={smartPasteInputRef}
+                    onPaste={handleSmartPaste}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 font-mono text-xs focus:border-indigo-500 focus:outline-none"
+                    rows={3}
+                    placeholder="Title[TAB]Description[TAB]Priority[TAB]Status[TAB]Start Date[TAB]End Date"
+                  />
+                  <div className="mt-2 flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={triggerSmartPaste}
+                      className="rounded-lg border border-gray-200 bg-gray-100 px-3 py-1 text-xs font-semibold text-gray-700 hover:bg-gray-200"
+                    >
+                      Focus paste area
+                    </button>
+                    {smartPasteSummary && (
+                      <span className="text-xs font-medium text-blue-700">{smartPasteSummary}</span>
+                    )}
+                  </div>
+                </div>
+
+                {smartBulkError && (
+                  <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700 whitespace-pre-line">
+                    {smartBulkError}
+                  </div>
+                )}
+
+                <div className="mt-6 overflow-x-auto rounded-lg border border-gray-200">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-gray-500">Row</th>
+                        {SMART_SHEET_COLUMNS.map((col) => (
+                          <th key={col.key} className="px-3 py-2 text-left text-xs font-semibold text-gray-500">{col.label}</th>
+                        ))}
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-gray-500">Notes</th>
+                        <th className="px-3 py-2 text-right text-xs font-semibold text-gray-500">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {smartBulkRows.map((row, idx) => {
+                        const rowIssues = smartRowIssueMap[idx];
+                        const hasValue = !isSmartRowEmpty(row);
+                        return (
+                          <tr key={`smart-row-${idx}`} className={`border-t ${rowIssues.length ? "bg-amber-50" : "bg-white"}`}>
+                            <td className="px-3 py-2 text-xs text-gray-500">{idx + 1}</td>
+                            {SMART_SHEET_COLUMNS.map((col) => {
+                              if (col.key === "priority") {
+                                return (
+                                  <td key={`${col.key}-${idx}`} className="px-2 py-2 min-w-[130px]">
                                     <select
                                       value={row.priority}
-                                      onChange={(e) => updateInlineRow(row.id, 'priority', e.target.value)}
-                                      className="w-full border rounded px-2 py-1"
+                                      onChange={(e) => updateSmartRowField(idx, col.key, e.target.value)}
+                                      className="w-full rounded border border-gray-300 px-2 py-1 text-xs focus:border-indigo-500 focus:outline-none"
                                     >
                                       {INLINE_PRIORITY_OPTIONS.map((priorityOpt) => (
                                         <option key={priorityOpt} value={priorityOpt}>
@@ -3050,54 +3166,95 @@ export default function AdminDashboard() {
                                       ))}
                                     </select>
                                   </td>
-                                  <td className="p-2 text-right">
-                                    <button
-                                      type="button"
-                                      onClick={() => removeInlineRow(row.id)}
-                                      disabled={inlineBulkRows.length === 1}
-                                      className="text-xs px-3 py-1 rounded bg-red-50 text-red-600 disabled:opacity-40"
+                                );
+                              }
+                              if (col.key === "status") {
+                                return (
+                                  <td key={`${col.key}-${idx}`} className="px-2 py-2 min-w-[150px]">
+                                    <select
+                                      value={row.status}
+                                      onChange={(e) => updateSmartRowField(idx, col.key, e.target.value)}
+                                      className="w-full rounded border border-gray-300 px-2 py-1 text-xs focus:border-indigo-500 focus:outline-none"
                                     >
-                                      Remove
-                                    </button>
+                                      {INLINE_STATUS_OPTIONS.map((status) => (
+                                        <option key={status} value={status}>
+                                          {status.replace(/\b\w/g, (char) => char.toUpperCase())}
+                                        </option>
+                                      ))}
+                                    </select>
                                   </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          <button type="button" onClick={() => addInlineRows(1)} className="px-3 py-1 rounded bg-gray-100 text-sm">+ Add row</button>
-                          <button type="button" onClick={() => addInlineRows(5)} className="px-3 py-1 rounded bg-gray-100 text-sm">+ Add 5 rows</button>
-                          <button type="button" onClick={resetInlineSheet} className="px-3 py-1 rounded bg-gray-100 text-sm">Clear sheet</button>
-                        </div>
-                        <div>
-                          <label className="text-sm text-gray-600">Paste rows (Title, Start, End, Status, Priority)</label>
-                          <textarea
-                            rows={4}
-                            value={inlinePasteValue}
-                            onChange={(e) => setInlinePasteValue(e.target.value)}
-                            placeholder="Task A\t2025-01-01\t2025-01-15\tPending\tHigh"
-                            className="w-full border rounded px-3 py-2 text-sm mt-2"
-                          ></textarea>
-                          <div className="flex justify-end gap-2 mt-2">
-                            <button
-                              type="button"
-                              onClick={handleInlinePasteApply}
-                              disabled={!inlinePasteValue.trim()}
-                              className="px-4 py-2 rounded text-sm font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40"
-                            >
-                              Fill sheet from paste
-                            </button>
-                          </div>
-                        </div>
-                        <div className="flex justify-end gap-2">
-                          <button type="button" onClick={closeBulkPanel} className="bg-gray-100 px-4 py-2 rounded">Cancel</button>
-                          <button type="button" onClick={handleInlinePreview} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">Save & Preview</button>
-                        </div>
-                      </>
-                    )}
+                                );
+                              }
+                              const isDateField = col.key === "startDate" || col.key === "endDate";
+                              return (
+                                <td key={`${col.key}-${idx}`} className="px-2 py-2 min-w-[160px]">
+                                  <input
+                                    type={isDateField ? "date" : "text"}
+                                    value={row[col.key] || ""}
+                                    onChange={(e) => updateSmartRowField(idx, col.key, e.target.value)}
+                                    placeholder={col.placeholder}
+                                    className="w-full rounded border border-gray-300 px-2 py-1 text-xs focus:border-indigo-500 focus:outline-none"
+                                  />
+                                </td>
+                              );
+                            })}
+                            <td className="px-2 py-2 text-xs align-top">
+                              {rowIssues.length ? (
+                                <ul className="list-disc space-y-1 pl-4 text-amber-800">
+                                  {rowIssues.map((issue, issueIdx) => (
+                                    <li key={issueIdx}>{issue}</li>
+                                  ))}
+                                </ul>
+                              ) : hasValue ? (
+                                <span className="text-emerald-700 font-semibold">Ready</span>
+                              ) : (
+                                <span className="text-gray-400">Empty</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <button
+                                type="button"
+                                onClick={() => removeSmartRow(idx)}
+                                className="text-xs font-semibold text-red-600 hover:text-red-800"
+                              >
+                                Remove
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-xs text-gray-500">
+                    {smartReadyCount > 0
+                      ? `${smartReadyCount} row${smartReadyCount === 1 ? " is" : "s are"} ready.`
+                      : "Fill at least one row to enable upload."}
                   </div>
-                )}
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={closeBulkPanel}
+                      className="rounded-lg bg-gray-100 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-200"
+                    >
+                      Close
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSmartBulkUpload}
+                      disabled={smartBulkProcessing || smartReadyCount === 0 || !bulkAssignedUserId}
+                      className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                    >
+                      {smartBulkProcessing
+                        ? "Uploading..."
+                        : smartReadyCount > 0
+                          ? `Upload ${smartReadyCount} Task${smartReadyCount === 1 ? "" : "s"}`
+                          : "Upload Tasks"}
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -3370,6 +3527,36 @@ export default function AdminDashboard() {
             <div className="flex items-center gap-3">
               <input value={filterName} onChange={(e) => setFilterName(e.target.value)} placeholder="Filter by name/email" className="px-3 py-1 rounded border text-sm" />
               <div className="flex items-center gap-2">
+                <label className="text-sm text-gray-600">Start</label>
+                <input
+                  type="date"
+                  value={taskFilterStartDate}
+                  onChange={(e) => setTaskFilterStartDate(e.target.value)}
+                  className="px-3 py-1 rounded border text-sm"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-sm text-gray-600">End</label>
+                <input
+                  type="date"
+                  value={taskFilterEndDate}
+                  onChange={(e) => setTaskFilterEndDate(e.target.value)}
+                  className="px-3 py-1 rounded border text-sm"
+                />
+              </div>
+              {(taskFilterStartDate || taskFilterEndDate) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTaskFilterStartDate("");
+                    setTaskFilterEndDate("");
+                  }}
+                  className="text-xs text-blue-600 hover:underline"
+                >
+                  Clear dates
+                </button>
+              )}
+              <div className="flex items-center gap-2">
                 <label className="text-sm"><input type="checkbox" checked={selectedStatuses.has('all')} onChange={() => {
                   // toggle all
                   setSelectedStatuses(new Set(['all']));
@@ -3420,13 +3607,20 @@ export default function AdminDashboard() {
           <p>Loading...</p>
         ) : (
           (() => {
+            const normalizedStartFilter = taskFilterStartDate ? normalizeToMidnight(taskFilterStartDate) : null;
+            const normalizedEndFilter = taskFilterEndDate ? normalizeToMidnight(taskFilterEndDate) : null;
+
             const filtered = tasks.filter((task) => {
               const nameMatch =
                 filterName.trim() === "" ||
                 (task.assignedName && task.assignedName.toLowerCase().includes(filterName.toLowerCase())) ||
                 (task.assignedEmail && task.assignedEmail.toLowerCase().includes(filterName.toLowerCase()));
               const statusMatch = (selectedStatuses.has('all')) || selectedStatuses.has(canonicalStatus(task.status));
-              return nameMatch && statusMatch;
+              const taskStartDate = normalizeToMidnight(toDateObj(task.startDate));
+              const taskEndDate = normalizeToMidnight(toDateObj(task.endDate));
+              const matchesStartRange = !normalizedStartFilter || (taskStartDate && taskStartDate >= normalizedStartFilter);
+              const matchesEndRange = !normalizedEndFilter || (taskEndDate && taskEndDate <= normalizedEndFilter);
+              return nameMatch && statusMatch && matchesStartRange && matchesEndRange;
             });
 
             if (filtered.length === 0) return <p className="text-gray-500">No tasks found.</p>;
