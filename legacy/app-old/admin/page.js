@@ -160,6 +160,43 @@ const tryParseSmartDate = (value) => {
   return parsed;
 };
 
+const normalizeAttendanceDate = (value) => {
+  if (!value) return "";
+  if (typeof value === "string") {
+    return normalizeDateInputString(value);
+  }
+  if (value?.seconds) {
+    return new Date(value.seconds * 1000).toISOString().split("T")[0];
+  }
+  if (typeof value?.toDate === "function") {
+    const dateObj = value.toDate();
+    return dateObj ? dateObj.toISOString().split("T")[0] : "";
+  }
+  if (value instanceof Date) {
+    return value.toISOString().split("T")[0];
+  }
+  return "";
+};
+
+const normalizeAttendanceStatus = (value) => {
+  if (!value && value !== 0) return "";
+  const raw = value.toString().trim();
+  if (!raw) return "";
+  if (ATTENDANCE_STATUS_ORDER.includes(raw)) return raw;
+
+  const lower = raw.toLowerCase();
+  if (ATTENDANCE_STATUS_ORDER.includes(lower)) return lower;
+
+  const collapsed = lower.replace(/[^a-z]/g, "");
+  if (collapsed === "shortleave" || collapsed === "halfday" || collapsed === "shortleaves") return "shortLeave";
+  if (collapsed === "present" || collapsed === "p" || collapsed === "presentday") return "present";
+  if (collapsed === "outdoor" || collapsed === "out" || collapsed === "field" || collapsed === "onsite") return "outdoor";
+  if (collapsed === "absent" || collapsed === "a" || collapsed === "leave" || collapsed === "sick") return "absent";
+  if (collapsed === "off" || collapsed === "holiday" || collapsed === "weekend" || collapsed === "offday") return "off";
+
+  return lower;
+};
+
 const parseSmartSheetText = (text) => {
   if (!text) return [];
   const rows = text
@@ -899,7 +936,29 @@ export default function AdminDashboard() {
       const attendanceSnap = await getDocs(collection(db, "attendance"));
       const data = {};
       attendanceSnap.forEach((docSnap) => {
-        data[docSnap.id] = docSnap.data().status;
+        const docData = docSnap.data() || {};
+        const statusValue = docData.status || docData.attendanceStatus || docData.value || docData.statusValue;
+        const normalizedStatus = normalizeAttendanceStatus(statusValue);
+        if (!normalizedStatus) return;
+
+        let userId = docData.userId || docData.uid || docData.employeeId || docData.userUID || docData.assignedTo;
+        let normalizedDate = normalizeAttendanceDate(docData.date || docData.attendanceDate || docData.day || docData.markedDate);
+
+        if ((!userId || !normalizedDate) && docSnap.id) {
+          const idSegments = docSnap.id.split("_");
+          if (idSegments.length >= 2) {
+            const maybeUser = idSegments[0];
+            const maybeDate = idSegments.slice(1).join("_");
+            if (!userId && maybeUser) userId = maybeUser;
+            if (!normalizedDate && maybeDate) normalizedDate = normalizeAttendanceDate(maybeDate);
+          }
+        }
+
+        if (userId && normalizedDate) {
+          data[`${userId}_${normalizedDate}`] = normalizedStatus;
+        } else if (docSnap.id) {
+          data[docSnap.id] = normalizedStatus;
+        }
       });
       if (Object.keys(data).length) {
         setAttendanceData((prev) => ({ ...prev, ...data }));

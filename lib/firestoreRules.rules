@@ -17,10 +17,26 @@ service cloud.firestore {
          request.auth.token.admin == true);
     }
     
+    function emailsMatch(targetEmail) {
+      return targetEmail != null && request.auth != null && request.auth.token.email != null &&
+        lower(targetEmail) == lower(request.auth.token.email);
+    }
+
+    function isSameUser(targetUid, targetEmail) {
+      return (targetUid != null && request.auth != null && request.auth.uid == targetUid) || emailsMatch(targetEmail);
+    }
+
     // Users Collection Rules
     match /users/{userId} {
-      // Read: Admins can read all, users can read their own
-      allow read: if isAuthenticated() && (isAdmin() || request.auth.uid == userId);
+      // Get: Admins can read all. Authenticated users can read their own profile (by UID or email match).
+      allow get: if isAdmin() || (
+        isAuthenticated() && (
+          request.auth.uid == userId || (resource != null && emailsMatch(resource.data.email))
+        )
+      );
+
+      // List/Query: Only admins (prevents employees from enumerating all users)
+      allow list: if isAdmin();
       
       // Create: Anyone can create their own profile
       allow create: if isAuthenticated() && request.auth.uid == userId;
@@ -124,13 +140,35 @@ service cloud.firestore {
 
     // KPI Scores Collection Rules
     match /kpi/{kpiId} {
-      // Read: Only admins can read KPI data
-      allow read: if isAdmin();
+      // Read: Admins or KPI owner (matched by uid/email or encoded doc id prefix)
+      allow read: if isAdmin() || (
+        isAuthenticated() && (
+          (resource.data.userId != null && resource.data.userId == request.auth.uid) ||
+          emailsMatch(resource.data.userEmail) ||
+          (request.auth.uid != null && kpiId.matches(request.auth.uid + "_.*"))
+        )
+      );
 
       // Create: Only admins can create KPI scores
       allow create: if isAdmin();
 
       // Update/Delete: Only admins can modify KPI scores
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Notifications Collection Rules
+    match /notifications/{notificationId} {
+      // Read: Admins and intended recipients
+      allow read: if isAdmin() || (
+        isAuthenticated() && (
+          (resource.data.recipientUid != null && resource.data.recipientUid == request.auth.uid) ||
+          emailsMatch(resource.data.recipientEmail)
+        )
+      );
+
+      // Create/Update/Delete: Only admins can manage notifications
+      allow create: if isAdmin();
       allow update: if isAdmin();
       allow delete: if isAdmin();
     }

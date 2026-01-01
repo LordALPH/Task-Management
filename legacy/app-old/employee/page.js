@@ -19,6 +19,41 @@ import {
 import { createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "firebase/auth";
 import DashboardAnalytics from "../admin/component/DashboardAnalytics";
 
+const canonicalStatus = (status = "") => {
+  const normalized = status.toString().trim().toLowerCase();
+  if (normalized.includes("complete")) return "completed";
+  if (normalized.includes("delay")) return "delayed";
+  return normalized;
+};
+
+const MONTH_NAME_TO_INDEX = {
+  january: 0,
+  february: 1,
+  march: 2,
+  april: 3,
+  may: 4,
+  june: 5,
+  july: 6,
+  august: 7,
+  september: 8,
+  october: 9,
+  november: 10,
+  december: 11,
+};
+
+const gradeFromScore = (score = 0) => {
+  if (score > 90) return "A";
+  if (score >= 85 && score <= 90) return "B";
+  if (score >= 80 && score <= 84) return "C";
+  if (score >= 70 && score <= 79) return "D";
+  return "F";
+};
+
+const formatOneDecimal = (value) => {
+  if (!Number.isFinite(value)) return "0.0";
+  return (Math.round(value * 10) / 10).toFixed(1);
+};
+
 export default function AdminDashboard() {
   const router = useRouter();
   const [tasks, setTasks] = useState([]);
@@ -54,6 +89,7 @@ export default function AdminDashboard() {
   const [selectedReminderIds, setSelectedReminderIds] = useState(new Set());
   const [sending, setSending] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
+  const [currentUserRole, setCurrentUserRole] = useState(null);
   // employee welcome popup
   const [showWelcomeEmployee, setShowWelcomeEmployee] = useState(false);
   const [welcomeVisibleEmployee, setWelcomeVisibleEmployee] = useState(false);
@@ -62,24 +98,51 @@ export default function AdminDashboard() {
   // store transient reaction per task id (e.g., 'completed'|'delayed'|'cancelled'|'in process')
   const [statusReactions, setStatusReactions] = useState({});
   const [pendingRequests, setPendingRequests] = useState(new Set());
+  const [taskFilterStart, setTaskFilterStart] = useState("");
+  const [taskFilterEnd, setTaskFilterEnd] = useState("");
+  const [evaluationStartDate, setEvaluationStartDate] = useState("");
+  const [evaluationEndDate, setEvaluationEndDate] = useState("");
+  const [attendanceRecords, setAttendanceRecords] = useState([]);
+  const [kpiRecords, setKpiRecords] = useState([]);
 
-  // 🔹 Fetch all users + tasks (initial)
+  // 🔹 Fetch current user profile (role-aware) + initial tasks
   useEffect(() => {
+    if (!currentUser) return;
+
     const fetchData = async () => {
-      const usersSnap = await getDocs(collection(db, "users"));
-      const tasksSnap = await getDocs(collection(db, "tasks"));
-      const usersData = usersSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      const tasksData = tasksSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      setUsers(usersData);
-      setTasks(tasksData);
-      // initialise actualStatusMap from tasks
-      const map = {};
-      tasksData.forEach((t) => (map[t.id] = t.actualStatus || ""));
-      setActualStatusMap(map);
-      setLoading(false);
+      try {
+        const meRef = doc(db, "users", currentUser.uid);
+        const meSnap = await getDoc(meRef);
+        const meData = meSnap.exists() ? { id: meSnap.id, ...meSnap.data() } : null;
+        const normalizedRole = (meData?.role || "employee").toLowerCase();
+        setCurrentUserRole(normalizedRole);
+
+        let usersData = [];
+        if (normalizedRole === "admin") {
+          const usersSnap = await getDocs(collection(db, "users"));
+          usersData = usersSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        } else if (meData) {
+          usersData = [meData];
+        } else {
+          usersData = [{ id: currentUser.uid, uid: currentUser.uid, email: currentUser.email || "", role: "employee" }];
+        }
+        setUsers(usersData);
+
+        const tasksSnap = await getDocs(collection(db, "tasks"));
+        const tasksData = tasksSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        setTasks(tasksData);
+        const map = {};
+        tasksData.forEach((t) => (map[t.id] = t.actualStatus || ""));
+        setActualStatusMap(map);
+      } catch (error) {
+        console.error("Failed to load initial dashboard data", error);
+      } finally {
+        setLoading(false);
+      }
     };
+
     fetchData();
-  }, []);
+  }, [currentUser]);
 
   // watch auth state so we know who is signed in (employee)
 
@@ -133,23 +196,16 @@ export default function AdminDashboard() {
 
   // Real-time listeners
   useEffect(() => {
-    const usersRef = collection(db, "users");
-    const unsubscribeUsers = onSnapshot(usersRef, (snapshot) => {
-      setUsers(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
-    });
-
     const tasksRef = collection(db, "tasks");
     const unsubscribeTasks = onSnapshot(tasksRef, (snapshot) => {
       const t = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
       setTasks(t);
-      // keep actualStatusMap in sync with latest tasks
       setActualStatusMap((prev) => {
         const next = { ...prev };
         t.forEach((task) => {
           if (typeof task.actualStatus !== "undefined") next[task.id] = task.actualStatus;
           else if (!(task.id in next)) next[task.id] = "";
         });
-        // remove keys for deleted tasks
         Object.keys(next).forEach((k) => {
           if (!t.find((x) => x.id === k)) delete next[k];
         });
@@ -157,13 +213,19 @@ export default function AdminDashboard() {
       });
     });
 
-    setLoading(false);
-
     return () => {
-      unsubscribeUsers();
       unsubscribeTasks();
     };
   }, []);
+
+  useEffect(() => {
+    if (!currentUser || currentUserRole !== "admin") return;
+    const usersRef = collection(db, "users");
+    const unsubscribeUsers = onSnapshot(usersRef, (snapshot) => {
+      setUsers(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
+    });
+    return () => unsubscribeUsers();
+  }, [currentUser, currentUserRole]);
 
   // 🔹 Add new employee
   const addEmployee = async (e) => {
@@ -196,6 +258,51 @@ export default function AdminDashboard() {
     if (d instanceof Date) return d;
     const parsed = new Date(d);
     return isNaN(parsed.getTime()) ? null : parsed;
+  };
+
+  const normalizeDateOnly = (rawValue) => {
+    const date = toDateObj(rawValue);
+    if (!date) return null;
+    const normalized = new Date(date.getTime());
+    normalized.setHours(0, 0, 0, 0);
+    return normalized;
+  };
+
+  const isWithinRange = (dateObj, start, end) => {
+    if (!start && !end) return true;
+    if (!dateObj) return false;
+    const value = normalizeDateOnly(dateObj);
+    if (!value) return false;
+    if (start) {
+      const startDate = normalizeDateOnly(start);
+      if (startDate && value < startDate) return false;
+    }
+    if (end) {
+      const endDate = normalizeDateOnly(end);
+      if (endDate && value > endDate) return false;
+    }
+    return true;
+  };
+
+  const getTaskAssignmentDate = (task) => {
+    if (!task) return null;
+    return (
+      normalizeDateOnly(task.startDate) ||
+      normalizeDateOnly(task.assignedDate) ||
+      normalizeDateOnly(task.createdAt) ||
+      normalizeDateOnly(task.endDate)
+    );
+  };
+
+  const getKpiEntryDate = (entry) => {
+    if (!entry) return null;
+    if (entry.date) return normalizeDateOnly(entry.date);
+    const monthIndex = MONTH_NAME_TO_INDEX[(entry.month || "").toString().trim().toLowerCase()];
+    const yearNumber = Number(entry.year);
+    if (!Number.isFinite(monthIndex) || !Number.isFinite(yearNumber)) return null;
+    const date = new Date(yearNumber, monthIndex, 1);
+    date.setHours(0, 0, 0, 0);
+    return date;
   };
 
   // 🔹 Add Task (assign by dropdown or email + start & end dates + priority)
@@ -531,30 +638,44 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     if (!currentUser) return;
-    // listen to notifications where recipientUid === currentUser.uid OR recipientEmail === currentUser.email
-    const q = query(collection(db, "notifications"), where("recipientUid", "==", currentUser.uid));
-    const unsubUid = onSnapshot(q, (snap) => {
-      setNotifications((prev) => {
-        // merge and dedupe by id
-        const byId = {};
-        prev.forEach((n) => (byId[n.id] = n));
-        snap.docs.forEach((d) => (byId[d.id] = { id: d.id, ...d.data() }));
-        return Object.values(byId).sort((a, b) => (a.createdAt && b.createdAt ? (a.createdAt.seconds || 0) - (b.createdAt.seconds || 0) : 0)).reverse();
+    const getSortValue = (input) => {
+      if (!input) return 0;
+      if (input.seconds) return input.seconds;
+      if (typeof input === "number") return input / 1000;
+      if (input instanceof Date) return input.getTime() / 1000;
+      if (input.toDate && typeof input.toDate === "function") {
+        return input.toDate().getTime() / 1000;
+      }
+      return 0;
+    };
+
+    let uidDocs = [];
+    let emailDocs = [];
+
+    const syncNotifications = () => {
+      const map = {};
+      uidDocs.forEach((doc) => {
+        map[doc.id] = doc;
       });
+      emailDocs.forEach((doc) => {
+        map[doc.id] = doc;
+      });
+      const combined = Object.values(map).sort((a, b) => getSortValue(b.createdAt) - getSortValue(a.createdAt));
+      setNotifications(combined);
+    };
+
+    const uidQuery = query(collection(db, "notifications"), where("recipientUid", "==", currentUser.uid));
+    const unsubUid = onSnapshot(uidQuery, (snap) => {
+      uidDocs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      syncNotifications();
     });
 
-    // also listen by email if present
     let unsubEmail = () => {};
-    const email = currentUser.email;
-    if (email) {
-      const q2 = query(collection(db, "notifications"), where("recipientEmail", "==", email));
-      unsubEmail = onSnapshot(q2, (snap) => {
-        setNotifications((prev) => {
-          const byId = {};
-          prev.forEach((n) => (byId[n.id] = n));
-          snap.docs.forEach((d) => (byId[d.id] = { id: d.id, ...d.data() }));
-          return Object.values(byId).sort((a, b) => (a.createdAt && b.createdAt ? (a.createdAt.seconds || 0) - (b.createdAt.seconds || 0) : 0)).reverse();
-        });
+    if (currentUser.email) {
+      const emailQuery = query(collection(db, "notifications"), where("recipientEmail", "==", currentUser.email));
+      unsubEmail = onSnapshot(emailQuery, (snap) => {
+        emailDocs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        syncNotifications();
       });
     }
 
@@ -569,6 +690,98 @@ export default function AdminDashboard() {
     if (!currentUser || !users) return null;
     return users.find((u) => u.uid === currentUser.uid || u.id === currentUser.uid || u.email === currentUser.email) || null;
   }, [currentUser, users]);
+
+  const meProfileUid = meProfile?.uid || "";
+  const meProfileId = meProfile?.id || "";
+  const meProfileEmail = meProfile?.email || "";
+
+  useEffect(() => {
+    if (!currentUser) return;
+    const identifiers = new Set();
+    if (currentUser.uid) identifiers.add(currentUser.uid);
+    if (meProfileUid) identifiers.add(meProfileUid);
+    if (meProfileId) identifiers.add(meProfileId);
+
+    const idList = Array.from(identifiers).filter(Boolean);
+    if (idList.length === 0) return;
+
+    const limitedIds = idList.slice(0, 10);
+    const attendanceQuery =
+      limitedIds.length === 1
+        ? query(collection(db, "attendance"), where("userId", "==", limitedIds[0]))
+        : query(collection(db, "attendance"), where("userId", "in", limitedIds));
+
+    const unsub = onSnapshot(attendanceQuery, (snap) => {
+      setAttendanceRecords(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+
+    return () => unsub();
+  }, [currentUser, meProfileUid, meProfileId]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setKpiRecords([]);
+      return;
+    }
+
+    let idDocs = [];
+    let emailDocs = [];
+
+    const sync = () => {
+      const map = {};
+      [...idDocs, ...emailDocs].forEach((entry) => {
+        if (!entry) return;
+        map[entry.id] = entry;
+      });
+      setKpiRecords(Object.values(map));
+    };
+
+    const handleKpiError = (error) => {
+      console.error("Failed to load KPI records", error);
+      setKpiRecords([]);
+    };
+
+    const identifiers = new Set();
+    if (currentUser.uid) identifiers.add(currentUser.uid);
+    if (meProfileUid) identifiers.add(meProfileUid);
+    if (meProfileId) identifiers.add(meProfileId);
+    const idList = Array.from(identifiers).filter(Boolean);
+
+    let unsubId = () => {};
+    if (idList.length > 0) {
+      const limitedIds = idList.slice(0, 10);
+      const kpiQuery =
+        limitedIds.length === 1
+          ? query(collection(db, "kpi"), where("userId", "==", limitedIds[0]))
+          : query(collection(db, "kpi"), where("userId", "in", limitedIds));
+      unsubId = onSnapshot(
+        kpiQuery,
+        (snap) => {
+          idDocs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+          sync();
+        },
+        handleKpiError
+      );
+    }
+
+    let unsubEmail = () => {};
+    if (currentUser.email) {
+      const emailQuery = query(collection(db, "kpi"), where("userEmail", "==", meProfileEmail || currentUser.email));
+      unsubEmail = onSnapshot(
+        emailQuery,
+        (snap) => {
+          emailDocs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+          sync();
+        },
+        handleKpiError
+      );
+    }
+
+    return () => {
+      unsubId();
+      unsubEmail();
+    };
+  }, [currentUser, meProfileUid, meProfileId, meProfileEmail]);
 
   const myTasks = useMemo(() => {
     if (!currentUser || !tasks) return [];
@@ -596,6 +809,108 @@ export default function AdminDashboard() {
     else grade = 'F';
     return { total, completed, rate, grade, remarks: grade === 'F' ? 'need improvment' : '' };
   }, [myTasks]);
+
+  const filteredMyTasks = useMemo(() => {
+    return myTasks.filter((task) => isWithinRange(getTaskAssignmentDate(task), taskFilterStart, taskFilterEnd));
+  }, [myTasks, taskFilterStart, taskFilterEnd]);
+
+  const portalReminders = useMemo(() => {
+    if (!notifications || notifications.length === 0) return [];
+    const taskLookup = myTasks.reduce((acc, task) => {
+      acc[task.id] = task;
+      return acc;
+    }, {});
+    return notifications
+      .filter((notif) => {
+        const title = (notif.title || "").toLowerCase();
+        const message = (notif.message || "").toLowerCase();
+        const looksLikeReminder = title.includes("reminder") || message.includes("reminder");
+        const belongsToTask = notif.taskId ? Boolean(taskLookup[notif.taskId]) : true;
+        return looksLikeReminder && belongsToTask;
+      })
+      .map((notif) => ({
+        ...notif,
+        task: notif.taskId ? taskLookup[notif.taskId] : null,
+      }));
+  }, [notifications, myTasks]);
+
+  const evaluationTasks = useMemo(() => {
+    return myTasks.filter((task) => isWithinRange(getTaskAssignmentDate(task), evaluationStartDate, evaluationEndDate));
+  }, [myTasks, evaluationStartDate, evaluationEndDate]);
+
+  const filteredAttendanceRecords = useMemo(() => {
+    return attendanceRecords.filter((record) => {
+      const rawDate = record.date || record.dateKey || record.fullDate;
+      return isWithinRange(normalizeDateOnly(rawDate), evaluationStartDate, evaluationEndDate);
+    });
+  }, [attendanceRecords, evaluationStartDate, evaluationEndDate]);
+
+  const filteredKpiRecords = useMemo(() => {
+    return kpiRecords.filter((entry) => isWithinRange(getKpiEntryDate(entry), evaluationStartDate, evaluationEndDate));
+  }, [kpiRecords, evaluationStartDate, evaluationEndDate]);
+
+  const evaluationStats = useMemo(() => {
+    const completedCount = evaluationTasks.filter((task) => canonicalStatus(task.status || task.actualStatus || "") === "completed").length;
+    const delayedCount = evaluationTasks.filter((task) => canonicalStatus(task.status || task.actualStatus || "") === "delayed").length;
+    const closingDenominator = completedCount + delayedCount;
+    const completionRate = closingDenominator > 0 ? (completedCount / closingDenominator) * 100 : 0;
+    const taskClosingScore = (completionRate / 100) * 50;
+
+    const qualityMarks = evaluationTasks
+      .map((task) => (typeof task.qualityMark === "number" ? task.qualityMark : null))
+      .filter((mark) => typeof mark === "number");
+    const qualityAverage = qualityMarks.length > 0 ? qualityMarks.reduce((sum, mark) => sum + mark, 0) / qualityMarks.length : 0;
+    const qualityScore = (qualityAverage / 100) * 20;
+
+    const attendanceCounts = filteredAttendanceRecords.reduce(
+      (acc, record) => {
+        const status = record.status || record.attendanceStatus;
+        if (!status) return acc;
+        acc[status] = (acc[status] || 0) + 1;
+        return acc;
+      },
+      { present: 0, outdoor: 0, shortLeave: 0, absent: 0, off: 0 }
+    );
+
+    const attendanceNumerator =
+      (attendanceCounts.present || 0) +
+      (attendanceCounts.outdoor || 0) +
+      (attendanceCounts.shortLeave || 0) * 0.8;
+    const attendanceDenominator =
+      (attendanceCounts.present || 0) +
+      (attendanceCounts.outdoor || 0) +
+      (attendanceCounts.shortLeave || 0) +
+      (attendanceCounts.absent || 0);
+    const attendancePercentage = attendanceDenominator > 0 ? (attendanceNumerator / attendanceDenominator) * 100 : 0;
+    const attendanceScore = (attendancePercentage / 100) * 15;
+
+    const kpiValues = filteredKpiRecords
+      .map((entry) => Number(entry.score))
+      .filter((value) => Number.isFinite(value) && value >= 0);
+    const kpiAverage = kpiValues.length > 0 ? kpiValues.reduce((sum, value) => sum + value, 0) / kpiValues.length : 0;
+    const kpiScore = (kpiAverage / 100) * 15;
+
+    const totalScore = taskClosingScore + attendanceScore + qualityScore + kpiScore;
+    const grade = gradeFromScore(totalScore);
+
+    return {
+      completionRate,
+      taskClosingScore,
+      attendancePercentage,
+      attendanceScore,
+      qualityAverage,
+      qualityScore,
+      kpiAverage,
+      kpiScore,
+      totalScore,
+      grade,
+      attendanceCounts,
+      closingDenominator,
+    };
+  }, [evaluationTasks, filteredAttendanceRecords, filteredKpiRecords]);
+
+  const evaluationRangeActive = Boolean(evaluationStartDate || evaluationEndDate);
+  const taskFilterActive = Boolean(taskFilterStart || taskFilterEnd);
 
   // If current user is an employee, render a minimal employee dashboard only
   if (currentUser && meProfile && meProfile.role !== 'admin') {
@@ -628,17 +943,140 @@ export default function AdminDashboard() {
           </div>
         )}
 
+        <div className="mb-6">
+          <div className="bg-white/90 p-6 rounded-2xl shadow-xl ring-1 ring-gray-100 hover:shadow-2xl transform transition-all duration-300 hover:-translate-y-1">
+            <div className="flex items-center justify-between gap-3 mb-4">
+              <h3 className="text-lg font-semibold">Your Evaluation</h3>
+              <span className="text-xs font-semibold uppercase tracking-wide text-gray-500">{evaluationRangeActive ? 'Filtered progress' : 'Overall progress'}</span>
+            </div>
+
+            <div className="flex flex-col gap-3 md:flex-row md:items-end">
+              <div className="flex-1">
+                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">From</label>
+                <input
+                  type="date"
+                  value={evaluationStartDate}
+                  onChange={(e) => setEvaluationStartDate(e.target.value)}
+                  className="mt-1 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                />
+              </div>
+              <div className="flex-1">
+                <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">To</label>
+                <input
+                  type="date"
+                  value={evaluationEndDate}
+                  onChange={(e) => setEvaluationEndDate(e.target.value)}
+                  className="mt-1 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setEvaluationStartDate("");
+                  setEvaluationEndDate("");
+                }}
+                disabled={!evaluationRangeActive}
+                className={`rounded-md px-4 py-2 text-sm font-semibold transition ${evaluationRangeActive ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-gray-200 text-gray-500 cursor-not-allowed'}`}
+              >
+                Clear filter
+              </button>
+            </div>
+
+            <p className="text-sm text-gray-600 mt-3">
+              Reviewing <span className="font-semibold text-gray-800">{evaluationTasks.length}</span> task{evaluationTasks.length === 1 ? '' : 's'} {evaluationRangeActive ? 'in the selected range.' : 'across your full assignment history.'}
+            </p>
+
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <div className="rounded-2xl border p-4 bg-gradient-to-br from-slate-50 to-white">
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Task closing marks</p>
+                <p className="mt-2 text-2xl font-semibold text-gray-900">{formatOneDecimal(evaluationStats.taskClosingScore)} <span className="text-sm text-gray-500">/ 50</span></p>
+                <p className="text-xs text-gray-500 mt-1">{formatOneDecimal(evaluationStats.completionRate)}% completion rate</p>
+              </div>
+              <div className="rounded-2xl border p-4 bg-gradient-to-br from-slate-50 to-white">
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Attendance marks %</p>
+                <p className="mt-2 text-2xl font-semibold text-gray-900">{formatOneDecimal(evaluationStats.attendancePercentage)}%</p>
+                <p className="text-xs text-gray-500 mt-1">{formatOneDecimal(evaluationStats.attendanceScore)} / 15 marks</p>
+              </div>
+              <div className="rounded-2xl border p-4 bg-gradient-to-br from-slate-50 to-white">
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Quality of work score</p>
+                <p className="mt-2 text-2xl font-semibold text-gray-900">{formatOneDecimal(evaluationStats.qualityScore)} <span className="text-sm text-gray-500">/ 20</span></p>
+                <p className="text-xs text-gray-500 mt-1">Avg quality: {formatOneDecimal(evaluationStats.qualityAverage)}</p>
+              </div>
+              <div className="rounded-2xl border p-4 bg-gradient-to-br from-slate-50 to-white">
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">KPI score</p>
+                <p className="mt-2 text-2xl font-semibold text-gray-900">{formatOneDecimal(evaluationStats.kpiScore)} <span className="text-sm text-gray-500">/ 15</span></p>
+                <p className="text-xs text-gray-500 mt-1">Avg KPI: {formatOneDecimal(evaluationStats.kpiAverage)}</p>
+              </div>
+            </div>
+
+            <div className="mt-6 rounded-2xl bg-gradient-to-r from-indigo-500 to-blue-500 p-5 text-white shadow-lg">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-widest text-white/80">Overall progress</p>
+                  <div className="text-4xl font-extrabold leading-tight">{formatOneDecimal(evaluationStats.totalScore)}%</div>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs font-semibold uppercase tracking-widest text-white/80">Grade</p>
+                  <div className="text-3xl font-black">{evaluationStats.grade}</div>
+                </div>
+              </div>
+              <div className="mt-4 h-2 w-full rounded-full bg-white/30">
+                <div className="h-full rounded-full bg-white" style={{ width: `${Math.min(100, Math.max(0, evaluationStats.totalScore))}%` }} />
+              </div>
+              <p className="mt-3 text-xs text-white/80">When no filter is applied you are viewing your overall performance.</p>
+            </div>
+
+            <p className="mt-4 text-xs text-gray-500">Lifetime summary: {myEvaluation.completed}/{myEvaluation.total} tasks closed ({myEvaluation.rate}%).</p>
+          </div>
+        </div>
+
         <div className="bg-white/90 p-6 rounded-2xl shadow-xl mb-6 ring-1 ring-gray-100 hover:shadow-2xl transform transition-all duration-300 hover:-translate-y-1">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
             <h2 className="text-xl font-semibold">Your Tasks</h2>
-            <div className="text-sm text-gray-500">Only your assigned tasks are shown here</div>
+            <div className="text-sm text-gray-500">
+              {taskFilterActive
+                ? `Showing ${filteredMyTasks.length} of ${myTasks.length} tasks`
+                : `Only your assigned tasks are shown here (${myTasks.length})`}
+            </div>
           </div>
 
-          {myTasks.length === 0 ? (
-            <p className="text-gray-500">You have no tasks assigned.</p>
+          <div className="flex flex-col gap-3 md:flex-row md:items-end mb-4">
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Start date</label>
+              <input
+                type="date"
+                value={taskFilterStart}
+                onChange={(e) => setTaskFilterStart(e.target.value)}
+                className="mt-1 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">End date</label>
+              <input
+                type="date"
+                value={taskFilterEnd}
+                onChange={(e) => setTaskFilterEnd(e.target.value)}
+                className="mt-1 w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setTaskFilterStart("");
+                setTaskFilterEnd("");
+              }}
+              disabled={!taskFilterActive}
+              className={`rounded-md px-4 py-2 text-sm font-semibold transition ${taskFilterActive ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-gray-200 text-gray-500 cursor-not-allowed'}`}
+            >
+              Clear filter
+            </button>
+          </div>
+
+          {filteredMyTasks.length === 0 ? (
+            <p className="text-gray-500">{taskFilterActive ? 'No tasks match this date range.' : 'You have no tasks assigned.'}</p>
           ) : (
             <div className="divide-y">
-              {myTasks.map((task) => (
+              {filteredMyTasks.map((task) => (
                 <div key={task.id} className={`py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4 ${statusChangingIds.has(task.id) ? 'animate-pulse ring-2 ring-indigo-200' : 'hover:shadow-sm'}`}>
                   <div className="flex-1">
                     <p className="font-medium text-gray-800">{task.title} {task.priority && (<span className={`ml-2 text-xs font-semibold inline-block px-2 py-1 rounded ${task.priority === 'high' ? 'bg-red-100 text-red-700' : task.priority === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}`}>{task.priority}</span>)} {pendingRequests.has(task.id) && (<span className="ml-2 text-xs px-2 py-1 bg-yellow-100 text-yellow-800 rounded">Pending approval</span>)}</p>
@@ -670,45 +1108,44 @@ export default function AdminDashboard() {
           )}
         </div>
 
-        <div className="grid md:grid-cols-2 gap-6 mb-6">
+        <div className="mb-6">
           <div className="bg-white/90 p-6 rounded-2xl shadow-xl ring-1 ring-gray-100 hover:shadow-2xl transform transition-all duration-300 hover:-translate-y-1">
-            <h3 className="text-lg font-semibold mb-3">Recent Tasks</h3>
-            {recentTasks.length === 0 ? <p className="text-gray-500">No recent tasks.</p> : (
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-lg font-semibold">Portal Reminders</h3>
+              <span className="text-xs uppercase tracking-wide text-gray-500">{portalReminders.length} active</span>
+            </div>
+            {portalReminders.length === 0 ? <p className="text-gray-500">No portal reminders yet. You will see admin reminders for your tasks here.</p> : (
               <ul className="space-y-2">
-                {recentTasks.map((t) => (
-                  <li key={t.id} className="p-2 border rounded">
-                    <div className="flex justify-between items-center">
-                      <div>
-                        <div className="font-medium">{t.title}</div>
-                        <div className="text-xs text-gray-500">Due: {formatDate(t.endDate)}</div>
-                      </div>
-                      <div className="text-sm font-semibold">{t.status}</div>
+                {portalReminders.map((reminder) => (
+                  <li key={reminder.id} className="p-3 border rounded hover:bg-gray-50 transition">
+                    <div className="font-medium">{reminder.task?.title || reminder.title}</div>
+                    <div className="text-sm text-gray-600">{reminder.message}</div>
+                    {reminder.task && (
+                      <div className="text-xs text-gray-500 mt-1">Due: {formatDate(reminder.task.endDate)} • Status: {reminder.task.status || 'pending'}</div>
+                    )}
+                    <div className="text-xs text-gray-400 mt-1">
+                      Sent {reminder.createdAt && reminder.createdAt.toDate ? reminder.createdAt.toDate().toLocaleString() : formatDate(reminder.createdAt)}
                     </div>
                   </li>
                 ))}
               </ul>
             )}
           </div>
-
-          <div className="bg-white/90 p-6 rounded-2xl shadow-xl ring-1 ring-gray-100 hover:shadow-2xl transform transition-all duration-300 hover:-translate-y-1">
-            <h3 className="text-lg font-semibold mb-3">Your Evaluation</h3>
-            <div className="text-sm">Total tasks: {myEvaluation.total}</div>
-            <div className="text-sm">Completed: {myEvaluation.completed}</div>
-            <div className="text-sm">Rate: {myEvaluation.rate}%</div>
-            <div className="text-sm font-semibold mt-2">Grade: <span className={`${myEvaluation.grade === 'A' ? 'text-green-600' : myEvaluation.grade === 'B' ? 'text-blue-600' : myEvaluation.grade === 'C' ? 'text-yellow-600' : myEvaluation.grade === 'D' ? 'text-orange-600' : 'text-red-600'}`}>{myEvaluation.grade}</span></div>
-            {myEvaluation.remarks && <div className="text-sm text-red-600 mt-1">{myEvaluation.remarks}</div>}
-          </div>
         </div>
 
         <div className="bg-white/90 p-6 rounded-2xl shadow-xl ring-1 ring-gray-100 hover:shadow-2xl transform transition-all duration-300 hover:-translate-y-1">
-          <h3 className="text-lg font-semibold mb-3">Portal Reminders</h3>
-          {notifications.length === 0 ? <p className="text-gray-500">No reminders.</p> : (
+          <h3 className="text-lg font-semibold mb-3">Recent Tasks</h3>
+          {recentTasks.length === 0 ? <p className="text-gray-500">No recent tasks.</p> : (
             <ul className="space-y-2">
-              {notifications.map((n) => (
-                <li key={n.id} className="p-3 border rounded hover:bg-gray-50 transition">
-                  <div className="font-medium">{n.title}</div>
-                  <div className="text-sm text-gray-600">{n.message}</div>
-                  <div className="text-xs text-gray-400 mt-1">{n.sentBy || ''} • {n.createdAt && n.createdAt.toDate ? n.createdAt.toDate().toLocaleString() : ''}</div>
+              {recentTasks.map((t) => (
+                <li key={t.id} className="p-2 border rounded">
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <div className="font-medium">{t.title}</div>
+                      <div className="text-xs text-gray-500">Due: {formatDate(t.endDate)}</div>
+                    </div>
+                    <div className="text-sm font-semibold">{t.status}</div>
+                  </div>
                 </li>
               ))}
             </ul>
