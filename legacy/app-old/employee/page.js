@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { auth, db } from "../lib/FirebaseClient";
 import {
@@ -104,6 +104,29 @@ export default function AdminDashboard() {
   const [evaluationEndDate, setEvaluationEndDate] = useState("");
   const [attendanceRecords, setAttendanceRecords] = useState([]);
   const [kpiRecords, setKpiRecords] = useState([]);
+
+  // Fallback loader so employees can still see KPI data if Firestore denies direct reads
+  const fetchKpisViaApi = useCallback(async () => {
+    try {
+      const activeUser = auth.currentUser || currentUser;
+      if (!activeUser) return;
+      const token = await activeUser.getIdToken();
+      const response = await fetch("/api/employee/kpi", {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(message || "Failed to load KPI records via API");
+      }
+      const payload = await response.json();
+      const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+      setKpiRecords(entries);
+    } catch (error) {
+      console.error("Failed to load KPI records via API", error);
+    }
+  }, [currentUser]);
 
   // 🔹 Fetch current user profile (role-aware) + initial tasks
   useEffect(() => {
@@ -726,8 +749,19 @@ export default function AdminDashboard() {
 
     let idDocs = [];
     let emailDocs = [];
+    let unsubId = () => {};
+    let unsubEmail = () => {};
+    let unsubscribed = false;
+    let fallbackTriggered = false;
+
+    const triggerFallback = () => {
+      if (fallbackTriggered || unsubscribed) return;
+      fallbackTriggered = true;
+      fetchKpisViaApi();
+    };
 
     const sync = () => {
+      if (unsubscribed) return;
       const map = {};
       [...idDocs, ...emailDocs].forEach((entry) => {
         if (!entry) return;
@@ -738,7 +772,9 @@ export default function AdminDashboard() {
 
     const handleKpiError = (error) => {
       console.error("Failed to load KPI records", error);
+      if (unsubscribed) return;
       setKpiRecords([]);
+      triggerFallback();
     };
 
     const identifiers = new Set();
@@ -747,7 +783,6 @@ export default function AdminDashboard() {
     if (meProfileId) identifiers.add(meProfileId);
     const idList = Array.from(identifiers).filter(Boolean);
 
-    let unsubId = () => {};
     if (idList.length > 0) {
       const limitedIds = idList.slice(0, 10);
       const kpiQuery =
@@ -762,10 +797,11 @@ export default function AdminDashboard() {
         },
         handleKpiError
       );
+    } else {
+      triggerFallback();
     }
 
-    let unsubEmail = () => {};
-    if (currentUser.email) {
+    if (currentUser.email || meProfileEmail) {
       const emailQuery = query(collection(db, "kpi"), where("userEmail", "==", meProfileEmail || currentUser.email));
       unsubEmail = onSnapshot(
         emailQuery,
@@ -775,13 +811,16 @@ export default function AdminDashboard() {
         },
         handleKpiError
       );
+    } else {
+      triggerFallback();
     }
 
     return () => {
+      unsubscribed = true;
       unsubId();
       unsubEmail();
     };
-  }, [currentUser, meProfileUid, meProfileId, meProfileEmail]);
+  }, [currentUser, meProfileUid, meProfileId, meProfileEmail, fetchKpisViaApi]);
 
   const myTasks = useMemo(() => {
     if (!currentUser || !tasks) return [];

@@ -2305,7 +2305,6 @@ export default function AdminDashboard() {
             <div className="mt-4 text-sm text-white/80 px-2">
               <p className="mb-2 font-medium">Features</p>
               <div className="flex flex-col gap-2 mb-4">
-                <button onClick={openTaskClosingPanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">Task closing</button>
                 <button onClick={openAttendancePanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">Attendence</button>
                 <button onClick={openQualityPanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">Quality of work</button>
                 <button onClick={openKpiPanel} className="text-sm px-3 py-2 rounded bg-white/6 hover:bg-white/10 text-left">KPI</button>
@@ -3841,7 +3840,7 @@ export default function AdminDashboard() {
                 <label className="text-sm">User:</label>
                 <select value={graphUserFilter} onChange={(e) => setGraphUserFilter(e.target.value)} className="border p-2 rounded text-sm">
                   <option value="">All users</option>
-                  {users.map((u) => (
+                  {employeeMembers.map((u) => (
                     <option key={u.id} value={u.uid || u.id}>{u.name ? `${u.name} (${u.email})` : u.email}</option>
                   ))}
                 </select>
