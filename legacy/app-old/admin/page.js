@@ -21,7 +21,6 @@ import { createUserWithEmailAndPassword, signOut, onAuthStateChanged } from "fir
 import DashboardAnalytics from "./component/DashboardAnalytics";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
-
 const KPI_MONTHS = [
   "January",
   "February",
@@ -197,6 +196,174 @@ const normalizeAttendanceStatus = (value) => {
   return lower;
 };
 
+const looksLikeIsoDate = (value) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
+
+const normalizeEmailKey = (value) => {
+  if (!value) return "";
+  return value.toString().trim().toLowerCase();
+};
+
+const buildAttendanceKeyVariants = (userId, email, date) => {
+  const normalizedDate = normalizeAttendanceDate(date);
+  if (!normalizedDate) return [];
+  const keys = [];
+  if (userId) keys.push(`${userId}_${normalizedDate}`);
+  const emailKey = normalizeEmailKey(email);
+  if (emailKey) keys.push(`${emailKey}_${normalizedDate}`);
+  return Array.from(new Set(keys));
+};
+
+const mergeAttendanceEntryIntoMap = (map, { userId, email, date, status }) => {
+  if (!status) return;
+  buildAttendanceKeyVariants(userId, email, date).forEach((key) => {
+    if (key) {
+      map[key] = status;
+    }
+  });
+};
+
+const resolveAttendanceStatusFromMap = (map, userId, email, date) => {
+  if (!date) return undefined;
+  const keys = buildAttendanceKeyVariants(userId, email, date);
+  for (const key of keys) {
+    if (map[key]) {
+      return map[key];
+    }
+  }
+  return undefined;
+};
+
+const deriveAttendanceIdentifiersFromDocId = (docId = "") => {
+  if (!docId) return { userId: "", date: "" };
+  const match = docId.match(/\d{4}-\d{2}-\d{2}/);
+  if (match) {
+    const date = match[0];
+    const before = docId.slice(0, match.index).replace(/[_-]+$/g, "");
+    const after = docId.slice(match.index + match[0].length).replace(/^[_-]+/g, "");
+    const userId = before || after || "";
+    return { userId, date };
+  }
+
+  const underscoreParts = docId.split("_");
+  if (underscoreParts.length === 2) {
+    if (looksLikeIsoDate(underscoreParts[0])) {
+      return { userId: underscoreParts[1], date: underscoreParts[0] };
+    }
+    if (looksLikeIsoDate(underscoreParts[1])) {
+      return { userId: underscoreParts[0], date: underscoreParts[1] };
+    }
+  }
+
+  return { userId: "", date: "" };
+};
+
+const normalizeAttendanceDocument = (docSnap) => {
+  const docData = docSnap.data() || {};
+  const statusValue = docData.status || docData.attendanceStatus || docData.value || docData.statusValue;
+  const normalizedStatus = normalizeAttendanceStatus(statusValue);
+  if (!normalizedStatus) return null;
+
+  const candidateUserIds = [
+    docData.userId,
+    docData.uid,
+    docData.employeeId,
+    docData.userUID,
+    docData.userUid,
+    docData.assignedTo,
+    docData.assignedUid,
+    docData.memberId,
+    docData.employeeUid,
+    docData.user,
+    docData.employee,
+    docData.member,
+    docData.recipientUid,
+    docData.recipientId,
+  ];
+
+  const candidateEmails = [
+    docData.userEmail,
+    docData.employeeEmail,
+    docData.email,
+    docData.assignedEmail,
+    docData.memberEmail,
+    docData.recipientEmail,
+    docData.emailAddress,
+    docData.assignedToEmail,
+    docData.userMail,
+    docData.employeeMail,
+    docData.memberMail,
+  ];
+
+  const candidateDates = [
+    docData.date,
+    docData.attendanceDate,
+    docData.day,
+    docData.markedDate,
+    docData.forDate,
+    docData.dateKey,
+    docData.fullDate,
+    docData.selectedDate,
+    docData.attendanceDay,
+    docData.dateString,
+    docData.markDate,
+    docData.recordedDate,
+  ];
+
+  let userId = candidateUserIds.find((value) => value) || "";
+  let userEmail = (candidateEmails.find((value) => value) || "").toString().trim();
+  let normalizedDate = normalizeAttendanceDate(candidateDates.find((value) => value));
+
+  if ((!userId || !normalizedDate) && docSnap.id) {
+    const derived = deriveAttendanceIdentifiersFromDocId(docSnap.id);
+    if (!userId && derived.userId) userId = derived.userId;
+    if (!normalizedDate && derived.date) normalizedDate = normalizeAttendanceDate(derived.date);
+  }
+
+  if (!userId && userEmail) {
+    userId = normalizeEmailKey(userEmail);
+  }
+
+  if (!normalizedDate) return null;
+
+  return {
+    id: docSnap.id,
+    userId: (userId || "").toString(),
+    userEmail,
+    email: userEmail,
+    userName: docData.userName || docData.employeeName || docData.assignedName || docData.name || "",
+    date: normalizedDate,
+    status: normalizedStatus,
+  };
+};
+
+const buildAttendanceStateFromDocs = (docs = []) => {
+  const map = {};
+  const entries = [];
+  docs.forEach((docSnap) => {
+    const normalized = normalizeAttendanceDocument(docSnap);
+    if (!normalized) return;
+    entries.push(normalized);
+    mergeAttendanceEntryIntoMap(map, {
+      userId: normalized.userId,
+      email: normalized.userEmail,
+      date: normalized.date,
+      status: normalized.status,
+    });
+  });
+  return { map, entries };
+};
+
+const upsertAttendanceEntry = (entries, entry) => {
+  const filtered = entries.filter((item) => item.id !== entry.id);
+  filtered.push(entry);
+  return filtered.sort((a, b) => {
+    const aTime = new Date(a.date).getTime();
+    const bTime = new Date(b.date).getTime();
+    if (Number.isNaN(aTime) || Number.isNaN(bTime)) return 0;
+    return bTime - aTime;
+  });
+};
+
 const parseSmartSheetText = (text) => {
   if (!text) return [];
   const rows = text
@@ -256,6 +423,26 @@ export default function AdminDashboard() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  const employeeMembers = useMemo(
+    () => (users || []).filter((member) => (member.role || "employee").toLowerCase() === "employee"),
+    [users]
+  );
+
+  const adminLookup = useMemo(() => {
+    const ids = new Set();
+    const emails = new Set();
+    (users || []).forEach((member) => {
+      if ((member.role || "").toLowerCase() === "admin") {
+        const uid = member.uid ? String(member.uid).toLowerCase() : "";
+        const docId = member.id ? String(member.id).toLowerCase() : "";
+        if (uid) ids.add(uid);
+        if (docId) ids.add(docId);
+        if (member.email) emails.add(member.email.toLowerCase());
+      }
+    });
+    return { ids, emails };
+  }, [users]);
+
   // Add Employee form state
   const [empName, setEmpName] = useState("");
   const [empEmail, setEmpEmail] = useState("");
@@ -286,10 +473,6 @@ export default function AdminDashboard() {
   // Task priority state (new)
   const [priority, setPriority] = useState("medium");
   const [reminderOnAdd, setReminderOnAdd] = useState(false);
-
-  // delete-mode toggles shown at section headings (right side)
-  const [showDeleteUsers, setShowDeleteUsers] = useState(false);
-  const [showDeleteTasks, setShowDeleteTasks] = useState(false);
 
   // UI view state: 'progress' | 'alltasks' | 'members'
   const [activeView, setActiveView] = useState("progress");
@@ -360,6 +543,7 @@ export default function AdminDashboard() {
   const [selectedMemberForQuality, setSelectedMemberForQuality] = useState("");
   const [qualityMarksDraft, setQualityMarksDraft] = useState({});
   const [savingQualityMarkTaskId, setSavingQualityMarkTaskId] = useState("");
+  const [qualityLockedTaskIds, setQualityLockedTaskIds] = useState({});
   const [kpiData, setKpiData] = useState({});
   const [showKpiPanel, setShowKpiPanel] = useState(false);
   const [selectedMemberForKpi, setSelectedMemberForKpi] = useState("");
@@ -370,11 +554,13 @@ export default function AdminDashboard() {
   // Attendance feature state
   const [showAttendancePanel, setShowAttendancePanel] = useState(false);
   const [attendanceData, setAttendanceData] = useState({});
+  const [attendanceEntries, setAttendanceEntries] = useState([]);
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth());
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
   const [selectedAttendanceDate, setSelectedAttendanceDate] = useState(() => getTodayISO());
   const [savingAttendanceKey, setSavingAttendanceKey] = useState("");
   const [selectedAttendanceMemberId, setSelectedAttendanceMemberId] = useState("");
+  const [attendanceLoadError, setAttendanceLoadError] = useState("");
   // Bulk attendance state
   const [bulkAttendanceDate, setBulkAttendanceDate] = useState("");
   const [bulkAttendanceAction, setBulkAttendanceAction] = useState("present");
@@ -539,6 +725,16 @@ export default function AdminDashboard() {
     if (Number.isNaN(date.getTime())) return null;
     date.setHours(0, 0, 0, 0);
     return date;
+  };
+
+  const getAssignedDateValue = (task) => {
+    if (!task) return 0;
+    const candidates = [task.assignedDate, task.createdAt, task.startDate, task.endDate];
+    for (const entry of candidates) {
+      const parsed = toDateObj(entry);
+      if (parsed) return parsed.getTime();
+    }
+    return 0;
   };
 
   const resetSmartBulkPanel = ({ preserveAssignee = false } = {}) => {
@@ -885,10 +1081,16 @@ export default function AdminDashboard() {
       alert("Please enter a valid mark between 0 and 100");
       return;
     }
+    const alreadyMarked = tasks.some((task) => task.id === taskId && typeof task.qualityMark === "number");
+    if (alreadyMarked || qualityLockedTaskIds[taskId]) {
+      alert("Quality marks are locked after the first save.");
+      return;
+    }
     try {
       setSavingQualityMarkTaskId(taskId);
       await updateDoc(doc(db, "tasks", taskId), { qualityMark: markNum, qualityMarkedAt: serverTimestamp() });
       setQualityMarksDraft((prev) => ({ ...prev, [taskId]: markNum }));
+      setQualityLockedTaskIds((prev) => ({ ...prev, [taskId]: true }));
     } catch (err) {
       alert("Failed to save quality mark: " + (err?.message || err));
     } finally {
@@ -931,42 +1133,59 @@ export default function AdminDashboard() {
     return days;
   }, [getHolidays]);
 
+  const fetchAttendanceViaApi = useCallback(async () => {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      throw new Error("You must be signed in to load attendance records.");
+    }
+
+    const token = await currentUser.getIdToken();
+    let payload = {};
+    const response = await fetch("/api/admin/attendance", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    try {
+      payload = await response.json();
+    } catch (err) {
+      payload = {};
+    }
+
+    if (!response.ok) {
+      throw new Error(payload?.error || "Failed to fetch attendance records via API.");
+    }
+
+    const rawEntries = Array.isArray(payload?.entries) ? payload.entries : [];
+    const docLikes = rawEntries.map((entry) => ({
+      id: entry.id,
+      data: () => entry,
+    }));
+    return buildAttendanceStateFromDocs(docLikes);
+  }, []);
+
   const loadAttendanceData = useCallback(async () => {
     try {
       const attendanceSnap = await getDocs(collection(db, "attendance"));
-      const data = {};
-      attendanceSnap.forEach((docSnap) => {
-        const docData = docSnap.data() || {};
-        const statusValue = docData.status || docData.attendanceStatus || docData.value || docData.statusValue;
-        const normalizedStatus = normalizeAttendanceStatus(statusValue);
-        if (!normalizedStatus) return;
-
-        let userId = docData.userId || docData.uid || docData.employeeId || docData.userUID || docData.assignedTo;
-        let normalizedDate = normalizeAttendanceDate(docData.date || docData.attendanceDate || docData.day || docData.markedDate);
-
-        if ((!userId || !normalizedDate) && docSnap.id) {
-          const idSegments = docSnap.id.split("_");
-          if (idSegments.length >= 2) {
-            const maybeUser = idSegments[0];
-            const maybeDate = idSegments.slice(1).join("_");
-            if (!userId && maybeUser) userId = maybeUser;
-            if (!normalizedDate && maybeDate) normalizedDate = normalizeAttendanceDate(maybeDate);
-          }
-        }
-
-        if (userId && normalizedDate) {
-          data[`${userId}_${normalizedDate}`] = normalizedStatus;
-        } else if (docSnap.id) {
-          data[docSnap.id] = normalizedStatus;
-        }
-      });
-      if (Object.keys(data).length) {
-        setAttendanceData((prev) => ({ ...prev, ...data }));
-      }
+      const { map, entries } = buildAttendanceStateFromDocs(attendanceSnap.docs);
+      setAttendanceData(map);
+      setAttendanceEntries(entries);
+      setAttendanceLoadError("");
     } catch (err) {
-      console.error("Failed to load attendance:", err);
+      console.error("Failed to load attendance via client SDK:", err);
+      try {
+        const { map, entries } = await fetchAttendanceViaApi();
+        setAttendanceData(map);
+        setAttendanceEntries(entries);
+        setAttendanceLoadError("");
+      } catch (apiError) {
+        console.error("Attendance API fallback failed:", apiError);
+        setAttendanceLoadError(apiError?.message || "Unable to load attendance records. Check Firestore rules.");
+      }
     }
-  }, []);
+  }, [fetchAttendanceViaApi]);
 
   const loadKpiData = useCallback(async () => {
     try {
@@ -990,6 +1209,23 @@ export default function AdminDashboard() {
       loadKpiData();
     });
   }, [authReady, ensureAdminProfile, loadAttendanceData, loadKpiData]);
+
+  useEffect(() => {
+    if (!authReady) return;
+    const attendanceRef = collection(db, "attendance");
+    const unsubscribe = onSnapshot(
+      attendanceRef,
+      (snapshot) => {
+        const { map, entries } = buildAttendanceStateFromDocs(snapshot.docs);
+        setAttendanceData(map);
+        setAttendanceEntries(entries);
+      },
+      (error) => {
+        console.error("Realtime attendance listener error:", error);
+      }
+    );
+    return () => unsubscribe();
+  }, [authReady]);
 
   const openAttendancePanel = async () => {
     setShowAttendancePanel(true);
@@ -1104,20 +1340,40 @@ export default function AdminDashboard() {
   };
 
   const markAttendance = async (userId, dateStr, status) => {
-    const key = `${userId}_${dateStr}`;
+    if (!dateStr) {
+      alert("Select a date first");
+      return;
+    }
+
+    const normalizedDate = normalizeAttendanceDate(dateStr);
+    if (!normalizedDate) {
+      alert("Invalid date selected.");
+      return;
+    }
+
+    const member = employeeMembers.find((u) => (u.uid || u.id) === userId) || users.find((u) => (u.uid || u.id) === userId);
+    const userEmail = member?.email || member?.assignedEmail || "";
+    const docId = `${userId || normalizeEmailKey(userEmail) || "unknown"}_${normalizedDate}`;
+    const userName = member?.name || member?.displayName || member?.email || "";
+
     try {
-      if (!dateStr) {
-        alert("Select a date first");
-        return;
-      }
-      setSavingAttendanceKey(key);
-      await setDoc(doc(db, "attendance", key), {
+      setSavingAttendanceKey(docId);
+      await setDoc(doc(db, "attendance", docId), {
         userId,
-        date: dateStr,
+        userEmail,
+        userName,
+        date: normalizedDate,
         status,
         markedAt: serverTimestamp()
+      }, { merge: true });
+
+      const entryPayload = { id: docId, userId, userEmail, email: userEmail, userName, date: normalizedDate, status };
+      setAttendanceData((prev) => {
+        const next = { ...prev };
+        mergeAttendanceEntryIntoMap(next, entryPayload);
+        return next;
       });
-      setAttendanceData((prev) => ({ ...prev, [key]: status }));
+      setAttendanceEntries((prev) => upsertAttendanceEntry(prev, entryPayload));
     } catch (err) {
       alert("Failed to mark attendance: " + (err?.message || err));
     } finally {
@@ -1130,10 +1386,21 @@ export default function AdminDashboard() {
       alert("Please select a date first");
       return;
     }
+
+    const normalizedDate = normalizeAttendanceDate(bulkAttendanceDate);
+    if (!normalizedDate) {
+      alert("Please select a valid date");
+      return;
+    }
+
+    if (employeeMembers.length === 0) {
+      alert("No employees available to update.");
+      return;
+    }
     
     const actionLabel = ATTENDANCE_STATUS_CONFIG[bulkAttendanceAction]?.label || bulkAttendanceAction;
     const confirmed = window.confirm(
-      `Are you sure you want to mark ALL employees as "${actionLabel}" for ${bulkAttendanceDate}?`
+      `Are you sure you want to mark ALL employees as "${actionLabel}" for ${normalizedDate}?`
     );
     
     if (!confirmed) return;
@@ -1142,33 +1409,49 @@ export default function AdminDashboard() {
       setApplyingBulkAttendance(true);
       const batch = writeBatch(db);
       let count = 0;
+      const entryPayloads = [];
+      const mapUpdates = {};
       
-      users.forEach((user) => {
-        const userId = user.uid || user.id;
-        const key = `${userId}_${bulkAttendanceDate}`;
-        const docRef = doc(db, "attendance", key);
+      employeeMembers.forEach((user) => {
+        const userId = user.uid || user.id || normalizeEmailKey(user.email);
+        const userEmail = user.email || user.assignedEmail || "";
+        const docId = `${userId || normalizeEmailKey(userEmail) || "unknown"}_${normalizedDate}`;
+        const docRef = doc(db, "attendance", docId);
         batch.set(docRef, {
           userId,
-          date: bulkAttendanceDate,
+          userEmail,
+          userName: user.name || user.displayName || userEmail || "",
+          date: normalizedDate,
           status: bulkAttendanceAction,
           markedAt: serverTimestamp(),
           bulkMarked: true
         });
+        const entryPayload = {
+          id: docId,
+          userId,
+          userEmail,
+          email: userEmail,
+          userName: user.name || user.displayName || userEmail || "",
+          date: normalizedDate,
+          status: bulkAttendanceAction,
+        };
+        entryPayloads.push(entryPayload);
+        mergeAttendanceEntryIntoMap(mapUpdates, entryPayload);
         count++;
       });
       
       await batch.commit();
       
-      // Update local state
-      const updates = {};
-      users.forEach((user) => {
-        const userId = user.uid || user.id;
-        const key = `${userId}_${bulkAttendanceDate}`;
-        updates[key] = bulkAttendanceAction;
+      setAttendanceData((prev) => ({ ...prev, ...mapUpdates }));
+      setAttendanceEntries((prev) => {
+        let next = prev;
+        entryPayloads.forEach((entry) => {
+          next = upsertAttendanceEntry(next, entry);
+        });
+        return next;
       });
-      setAttendanceData((prev) => ({ ...prev, ...updates }));
       
-      alert(`✓ Successfully marked ${count} employees as "${bulkAttendanceAction}" for ${bulkAttendanceDate}`);
+      alert(`✓ Successfully marked ${count} employees as "${bulkAttendanceAction}" for ${normalizedDate}`);
       setBulkAttendanceDate("");
     } catch (err) {
       console.error("Bulk attendance error:", err);
@@ -1178,7 +1461,7 @@ export default function AdminDashboard() {
     }
   };
 
-  const calculateAttendanceMetrics = useCallback((userId) => {
+  const calculateAttendanceMetrics = useCallback((userId, userEmail = "") => {
     const days = generateCalendarDays(currentMonth, currentYear);
     const workingDays = days.filter((d) => !d.isSunday && !d.holiday);
     const counts = {
@@ -1190,8 +1473,7 @@ export default function AdminDashboard() {
     };
 
     workingDays.forEach((day) => {
-      const key = `${userId}_${day.fullDate}`;
-      const status = attendanceData[key];
+      const status = resolveAttendanceStatusFromMap(attendanceData, userId, userEmail, day.fullDate);
       if (status === "off") {
         counts.off += 1;
         return;
@@ -1220,14 +1502,14 @@ export default function AdminDashboard() {
     return { ...counts, percentage };
   }, [attendanceData, currentMonth, currentYear, generateCalendarDays]);
 
-  const calculateAttendancePercentage = useCallback((userId) => {
-    return calculateAttendanceMetrics(userId).percentage;
+  const calculateAttendancePercentage = useCallback((userId, userEmail = "") => {
+    return calculateAttendanceMetrics(userId, userEmail).percentage;
   }, [calculateAttendanceMetrics]);
 
   const attendanceSummaries = useMemo(() => {
-    return users.map((u) => {
+    return employeeMembers.map((u) => {
       const uid = u.uid || u.id;
-      const metrics = calculateAttendanceMetrics(uid);
+      const metrics = calculateAttendanceMetrics(uid, u.email || u.assignedEmail || "");
       return {
         uid,
         name: u.name || u.email,
@@ -1239,21 +1521,28 @@ export default function AdminDashboard() {
         percentage: metrics.percentage,
       };
     });
-  }, [users, calculateAttendanceMetrics]);
+  }, [employeeMembers, calculateAttendanceMetrics]);
 
   const selectedAttendanceDetails = useMemo(() => {
     if (!selectedAttendanceMemberId) return null;
-    const member = users.find((u) => (u.uid || u.id) === selectedAttendanceMemberId);
+    const member = employeeMembers.find((u) => (u.uid || u.id) === selectedAttendanceMemberId);
     const days = generateCalendarDays(currentMonth, currentYear);
     const records = days
       .map((day) => {
-        const key = `${selectedAttendanceMemberId}_${day.fullDate}`;
-        const status = attendanceData[key];
+        const status = resolveAttendanceStatusFromMap(
+          attendanceData,
+          selectedAttendanceMemberId,
+          member?.email || member?.assignedEmail || "",
+          day.fullDate
+        );
         if (!status) return null;
         return { dateKey: day.fullDate, status };
       })
       .filter(Boolean);
-    const metrics = calculateAttendanceMetrics(selectedAttendanceMemberId);
+    const metrics = calculateAttendanceMetrics(
+      selectedAttendanceMemberId,
+      member?.email || member?.assignedEmail || ""
+    );
 
     return {
       uid: selectedAttendanceMemberId,
@@ -1264,13 +1553,24 @@ export default function AdminDashboard() {
     };
   }, [
     selectedAttendanceMemberId,
-    users,
-    attendanceData,
+    employeeMembers,
     currentMonth,
     currentYear,
     generateCalendarDays,
     calculateAttendanceMetrics,
+    attendanceData,
   ]);
+
+  const attendanceEntriesForCurrentMonth = useMemo(() => {
+    if (!attendanceEntries.length) return [];
+    return attendanceEntries
+      .filter((entry) => {
+        const entryDate = new Date(entry.date);
+        if (Number.isNaN(entryDate.getTime())) return false;
+        return entryDate.getFullYear() === currentYear && entryDate.getMonth() === currentMonth;
+      })
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [attendanceEntries, currentMonth, currentYear]);
 
   // 🔹 Add Task (assign by dropdown or email + start & end dates + priority)
   const addTask = async (e) => {
@@ -1291,7 +1591,7 @@ export default function AdminDashboard() {
     let employee = null;
     // if admin selected from dropdown, use that user directly
     if (selectedUserId) {
-      employee = users.find((u) => u.id === selectedUserId);
+      employee = employeeMembers.find((u) => u.id === selectedUserId);
       if (!employee) {
         alert("Selected member not found. Try selecting again.");
         return;
@@ -1576,11 +1876,6 @@ export default function AdminDashboard() {
   };
 
   const formatOneDecimalString = (value) => toOneDecimal(value).toFixed(1);
-
-  const employeeMembers = useMemo(() => (
-    (users || []).filter((member) => (member.role || "employee").toLowerCase() === "employee")
-  ), [users]);
-
   const selectedKpiMember = useMemo(() => (
     employeeMembers.find((member) => (member.uid || member.id || member.email) === selectedMemberForKpi) || null
   ), [employeeMembers, selectedMemberForKpi]);
@@ -1670,7 +1965,7 @@ export default function AdminDashboard() {
         const qualityAverage = calcAverage(qualityMarks);
         const qualityWeighted = toOneDecimal((qualityAverage / 100) * 20);
 
-        const attendancePercentage = calculateAttendancePercentage(userId);
+        const attendancePercentage = calculateAttendancePercentage(userId, u.email || u.assignedEmail || "");
         const attendanceWeighted = toOneDecimal((attendancePercentage / 100) * 15);
 
         const userKpis = kpiEntries.filter((entry) => {
@@ -1976,11 +2271,10 @@ export default function AdminDashboard() {
   }, [tasks]);
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <div className="flex">
-        {/* Sidebar */}
-        <aside className="w-72 min-h-screen px-5 py-6 bg-gradient-to-b from-blue-700 to-indigo-800 text-white flex flex-col justify-between">
-          <div>
+    <div className="min-h-screen bg-slate-50 flex">
+      {/* Sidebar */}
+      <aside className="w-72 h-screen fixed top-0 left-0 px-5 py-6 bg-gradient-to-b from-blue-700 to-indigo-800 text-white flex flex-col">
+        <div className="flex-1 overflow-y-auto pr-1 sidebar-scroll">
             <div className="flex items-center gap-3 mb-6 animate-slide-left">
               <div className="bg-white/10 p-2 rounded-md">
                 <svg width="36" height="36" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -2018,12 +2312,8 @@ export default function AdminDashboard() {
               </div>
               <p className="mb-1">Quick Actions</p>
                 <div className="flex flex-col gap-2">
-                <button onClick={() => { setShowDeleteUsers((s) => !s); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Toggle Delete Users</button>
-                <button onClick={() => { setShowDeleteTasks((s) => !s); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Toggle Delete Tasks</button>
                 <button onClick={() => { setShowAddEmployeePanel((s) => !s); setShowAddTaskPanel(false); setShowBulkPanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Add Employee</button>
                 <button onClick={() => { setShowAddTaskPanel((s) => !s); setShowAddEmployeePanel(false); setShowBulkPanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Add Task</button>
-                <button onClick={() => { setShowBulkPanel((s) => !s); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Bulk Add Tasks</button>
-                <button onClick={() => { setShowBulkUserPanel((s) => !s); setShowBulkPanel(false); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Bulk Add Users</button>
                 <button onClick={() => { setShowApprovalsPanel((s) => !s); setShowBulkUserPanel(false); setShowBulkPanel(false); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Approvals</button>
               </div>
             </div>
@@ -2036,10 +2326,11 @@ export default function AdminDashboard() {
               <button onClick={handleLogout} className="bg-white text-indigo-700 px-3 py-2 rounded-md">Logout</button>
             </div>
           </div>
-        </aside>
+      </aside>
 
-        {/* Main content area */}
-        <main className="flex-1 p-6">
+      {/* Main content area */}
+      <div className="flex-1 ml-72">
+        <main className="p-6">
           {/* Welcome overlay shown on admin login */}
           {showWelcome && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
@@ -2100,6 +2391,18 @@ export default function AdminDashboard() {
                       <button onClick={closeAttendancePanel} className="text-sm px-3 py-1 rounded bg-gray-100">Close</button>
                     </div>
                     <h2 className="text-xl font-semibold mb-4">📅 Attendance Management</h2>
+                    {attendanceLoadError && (
+                      <div className="mb-4 p-3 rounded-lg border border-red-200 bg-red-50 text-sm text-red-700">
+                        {attendanceLoadError}
+                        <button
+                          type="button"
+                          onClick={loadAttendanceData}
+                          className="ml-3 text-xs font-semibold underline"
+                        >
+                          Retry
+                        </button>
+                      </div>
+                    )}
                     
                     <div className="flex gap-4 mb-4 items-center">
                       <button onClick={() => {
@@ -2144,7 +2447,7 @@ export default function AdminDashboard() {
                         </div>
                         <button
                           onClick={applyBulkAttendance}
-                          disabled={applyingBulkAttendance || !bulkAttendanceDate}
+                          disabled={applyingBulkAttendance || !bulkAttendanceDate || employeeMembers.length === 0}
                           className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors duration-200 shadow-md hover:shadow-lg"
                         >
                           {applyingBulkAttendance ? (
@@ -2156,7 +2459,7 @@ export default function AdminDashboard() {
                               <span>Applying...</span>
                             </span>
                           ) : (
-                            `Apply to All (${users.length} employees)`
+                            `Apply to All (${employeeMembers.length} employees)`
                           )}
                         </button>
                       </div>
@@ -2191,16 +2494,23 @@ export default function AdminDashboard() {
                             </tr>
                           </thead>
                           <tbody>
-                            {users.length === 0 ? (
+                            {employeeMembers.length === 0 ? (
                               <tr>
                                 <td colSpan={4} className="p-4 text-center text-sm text-gray-500">No employees found. Add team members to start tracking attendance.</td>
                               </tr>
                             ) : (
-                              users.map((member) => {
+                              employeeMembers.map((member) => {
                                 const userId = member.uid || member.id;
-                                const statusKey = `${userId}_${selectedAttendanceDate}`;
-                                const currentStatus = attendanceData[statusKey];
-                                const isSaving = savingAttendanceKey === statusKey;
+                                const normalizedSelectedDate = normalizeAttendanceDate(selectedAttendanceDate);
+                                const memberEmail = member.email || member.assignedEmail || "";
+                                const currentStatus = resolveAttendanceStatusFromMap(
+                                  attendanceData,
+                                  userId,
+                                  memberEmail,
+                                  selectedAttendanceDate
+                                );
+                                const pendingKey = `${userId || normalizeEmailKey(memberEmail) || "unknown"}_${normalizedSelectedDate}`;
+                                const isSaving = savingAttendanceKey === pendingKey;
                                 const statusConfig = ATTENDANCE_STATUS_CONFIG[currentStatus];
                                 const statusStyles = statusConfig?.badgeClass || "bg-gray-100 text-gray-600";
                                 const statusLabel = statusConfig?.label || (currentStatus ? currentStatus : "Not marked");
@@ -2359,6 +2669,59 @@ export default function AdminDashboard() {
                             </div>
                           ) : (
                             <p className="text-xs text-gray-500">Select a member above to see their exact marked dates for this month.</p>
+                          )}
+                        </div>
+                        <div className="mt-8">
+                          <h3 className="text-lg font-bold mb-2">Attendance Records This Month</h3>
+                          {attendanceEntriesForCurrentMonth.length === 0 ? (
+                            <p className="text-sm text-gray-500">No attendance entries recorded in {new Date(currentYear, currentMonth).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} yet.</p>
+                          ) : (
+                            <div className="bg-white border border-gray-100 rounded-lg max-h-72 overflow-auto">
+                              <table className="min-w-full text-xs sm:text-sm">
+                                <thead className="bg-gray-50 text-gray-600 uppercase tracking-wide">
+                                  <tr>
+                                    <th className="px-3 py-2 text-left">Date</th>
+                                    <th className="px-3 py-2 text-left">Employee</th>
+                                    <th className="px-3 py-2 text-left">Status</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {attendanceEntriesForCurrentMonth.map((entry) => {
+                                    const entryEmail = (entry.userEmail || entry.email || '').toLowerCase();
+                                    const memberMatch = users.find((u) => {
+                                      const userId = u.uid || u.id || '';
+                                      if (userId && entry.userId && userId === entry.userId) return true;
+                                      const userEmail = (u.email || u.assignedEmail || '').toLowerCase();
+                                      return entryEmail && userEmail && userEmail === entryEmail;
+                                    });
+                                    const normalizedEntryUserId = (entry.userId || '').toString().toLowerCase();
+                                    const isAdminEntry = (normalizedEntryUserId && adminLookup.ids.has(normalizedEntryUserId)) || (entryEmail && adminLookup.emails.has(entryEmail));
+                                    if (isAdminEntry) return null;
+                                    const displayName = memberMatch?.name
+                                      || memberMatch?.displayName
+                                      || entry.userName
+                                      || entry.userEmail
+                                      || entry.userId
+                                      || 'Member';
+                                    const secondaryLabel = memberMatch?.email || entry.userEmail || memberMatch?.assignedEmail || '';
+                                    const config = ATTENDANCE_STATUS_CONFIG[entry.status] || {};
+                                    const badgeClass = config.badgeClass || 'bg-gray-100 text-gray-600';
+                                    return (
+                                      <tr key={`${entry.id || entry.date}-${entry.userId || entry.userEmail}-${entry.status}`} className="border-b last:border-b-0">
+                                        <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{formatDate(entry.date)}</td>
+                                        <td className="px-3 py-2">
+                                          <div className="text-gray-900 font-medium">{displayName}</div>
+                                          {secondaryLabel && <div className="text-[11px] text-gray-500">{secondaryLabel}</div>}
+                                        </td>
+                                        <td className="px-3 py-2">
+                                          <span className={`px-2 py-1 rounded ${badgeClass}`}>{config.label || entry.status}</span>
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
                           )}
                         </div>
                         </>
@@ -2786,7 +3149,10 @@ export default function AdminDashboard() {
                                     </tr>
                                   </thead>
                                   <tbody>
-                                    {memberTasks.map((task, idx) => (
+                                    {memberTasks.map((task, idx) => {
+                                      const taskQualityValue = qualityMarksDraft[task.id] ?? task.qualityMark ?? "";
+                                      const isQualityLocked = typeof task.qualityMark === "number" || Boolean(qualityLockedTaskIds[task.id]);
+                                      return (
                                       <tr key={task.id} className={`border-b hover:bg-gray-50 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
                                         <td className="p-3">
                                           <div className="font-medium text-gray-800">{task.title}</div>
@@ -2819,23 +3185,25 @@ export default function AdminDashboard() {
                                             type="number"
                                             min="0"
                                             max="100"
-                                            value={(qualityMarksDraft[task.id] ?? task.qualityMark ?? "")}
+                                            value={taskQualityValue}
                                             onChange={(e) => setQualityMarksDraft((prev) => ({ ...prev, [task.id]: e.target.value }))}
-                                            className="w-20 px-2 py-1 border border-gray-300 rounded focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400"
+                                            disabled={isQualityLocked}
+                                            className={`w-20 px-2 py-1 border border-gray-300 rounded focus:ring-2 focus:ring-indigo-400 focus:border-indigo-400 ${isQualityLocked ? 'bg-gray-100 cursor-not-allowed' : ''}`}
                                             placeholder="0-100"
                                           />
                                         </td>
                                         <td className="p-3">
                                           <button
                                             onClick={() => saveQualityMark(task.id, qualityMarksDraft[task.id] ?? task.qualityMark ?? 0)}
-                                            className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-3 py-1.5 rounded transition-colors duration-200"
-                                            disabled={savingQualityMarkTaskId === task.id}
+                                            className={`font-semibold text-xs px-3 py-1.5 rounded transition-colors duration-200 ${isQualityLocked ? 'bg-gray-300 text-gray-600 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 text-white'}`}
+                                            disabled={isQualityLocked || savingQualityMarkTaskId === task.id}
                                           >
-                                            {savingQualityMarkTaskId === task.id ? "Saving..." : "Save"}
+                                            {isQualityLocked ? "Locked" : (savingQualityMarkTaskId === task.id ? "Saving..." : "Save")}
                                           </button>
                                         </td>
                                       </tr>
-                                    ))}
+                                      );
+                                    })}
                                   </tbody>
                                 </table>
                                 {memberTasks.length === 0 && (
@@ -3019,14 +3387,14 @@ export default function AdminDashboard() {
                     const id = e.target.value;
                     setSelectedUserId(id);
                     if (id) {
-                      const u = users.find((x) => x.id === id);
+                      const u = employeeMembers.find((x) => x.id === id);
                       setAssignedEmail(u ? u.email : "");
                     } else {
                       setAssignedEmail("");
                     }
                   }} className="border p-2 w-full mb-3 rounded appearance-none">
                     <option value="">-- Select member --</option>
-                    {users.map((u) => (
+                    {employeeMembers.map((u) => (
                       <option key={u.id} value={u.id}>
                         {u.name ? `${u.name} (${u.email})` : u.email}
                       </option>
@@ -3399,29 +3767,25 @@ export default function AdminDashboard() {
             <div className="max-h-64 overflow-auto mb-2">
               <table className="min-w-full text-sm">
                 <thead>
-                  <tr className="bg-white sticky top-0 text-xs text-gray-500 uppercase tracking-wide">
-                    <th className="p-3 text-left">Employee</th>
-                    <th className="p-3 text-left">
+                  <tr className="bg-white sticky top-0 text-sm text-gray-600 uppercase tracking-wide">
+                    <th className="p-3 text-left font-semibold text-base">Employee</th>
+                    <th className="p-3 text-left font-semibold text-base">
                       <div>Task Closing</div>
-                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 50 weightage)</div>
                     </th>
-                    <th className="p-3 text-left">
+                    <th className="p-3 text-left font-semibold text-base">
                       <div>Attendance</div>
-                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 15 weightage)</div>
                     </th>
-                    <th className="p-3 text-left">
+                    <th className="p-3 text-left font-semibold text-base">
                       <div>Quality</div>
-                      <div className="text-[10px] font-normal normal-case text-gray-400">(marks out of 20 weightage)</div>
                     </th>
-                    <th className="p-3 text-left">
+                    <th className="p-3 text-left font-semibold text-base">
                       <div>KPI</div>
                     </th>
-                    <th className="p-3 text-left">
+                    <th className="p-3 text-left font-semibold text-base">
                       <div>Total</div>
                     </th>
-                    <th className="p-3 text-left">
+                    <th className="p-3 text-left font-semibold text-base">
                       <div>Grade</div>
-                      <div className="text-[10px] font-normal normal-case text-gray-400">(new scale)</div>
                     </th>
                   </tr>
                 </thead>
@@ -3517,9 +3881,6 @@ export default function AdminDashboard() {
         <div className="bg-white p-6 rounded-2xl shadow-md mb-6 transition-all duration-300 ease-in-out transform">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-semibold">👥 All Users</h2>
-          <div className="flex items-center gap-3">
-            <button onClick={() => setShowDeleteUsers((s) => !s)} className={`text-sm px-3 py-1 rounded ${showDeleteUsers ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-700"}`}>{showDeleteUsers ? "Exit delete" : "Enable delete"}</button>
-          </div>
         </div>
         <div className="mb-4">
           <input value={userSearch} onChange={(e) => setUserSearch(e.target.value)} placeholder="Search name or email" className="px-3 py-2 rounded border w-full md:w-72 text-sm" />
@@ -3540,7 +3901,6 @@ export default function AdminDashboard() {
                   <th className="p-2 text-left">Name</th>
                   <th className="p-2 text-left">Email</th>
                   <th className="p-2 text-left">Role</th>
-                  {showDeleteUsers && <th className="p-2 text-left">Action</th>}
                 </tr>
               </thead>
               <tbody>
@@ -3549,14 +3909,6 @@ export default function AdminDashboard() {
                     <td className="p-2">{u.name || "-"}</td>
                     <td className="p-2">{u.email}</td>
                     <td className={`p-2 font-semibold ${u.role === "admin" ? "text-blue-600" : "text-green-600"}`}>{u.role}</td>
-                    {showDeleteUsers && (
-                      <td className="p-2">
-                        <div className="flex items-center gap-2">
-                          <button onClick={() => openEditUser(u)} className="text-sm bg-yellow-500 hover:bg-yellow-600 text-white px-3 py-1 rounded">Edit</button>
-                          <button onClick={() => deleteUser(u.uid || u.id, u.name || u.email, u.email)} className="text-sm bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded">Delete</button>
-                        </div>
-                      </td>
-                    )}
                   </tr>
                 ))}
               </tbody>
@@ -3645,7 +3997,6 @@ export default function AdminDashboard() {
                   });
                 }} /> <span className="ml-2">Cancelled</span></label>
               </div>
-              <button onClick={() => setShowDeleteTasks((s) => !s)} className={`text-sm px-3 py-1 rounded ${showDeleteTasks ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-700"}`}>{showDeleteTasks ? "Exit delete" : "Enable delete"}</button>
             </div>
           </div>
         
@@ -3672,15 +4023,18 @@ export default function AdminDashboard() {
 
             if (filtered.length === 0) return <p className="text-gray-500">No tasks found.</p>;
 
+            const sortedByAssignedDate = [...filtered].sort((a, b) => getAssignedDateValue(b) - getAssignedDateValue(a));
+
             return (
               <div className="divide-y">
-                {filtered.map((task) => {
+                {sortedByAssignedDate.map((task) => {
                   const normalizedStatus = canonicalStatus(task.status);
                   const draftQualityValue = Object.prototype.hasOwnProperty.call(qualityMarksDraft, task.id)
                     ? qualityMarksDraft[task.id]
                     : (typeof task.qualityMark === "number" ? task.qualityMark : "");
                   const savedQualityValue = typeof task.qualityMark === "number" ? task.qualityMark : null;
-                  const disableQuickSave = draftQualityValue === "" || draftQualityValue === null || draftQualityValue === undefined || savingQualityMarkTaskId === task.id;
+                  const qualityScoreLocked = savedQualityValue !== null || Boolean(qualityLockedTaskIds[task.id]);
+                  const disableQuickSave = qualityScoreLocked || draftQualityValue === "" || draftQualityValue === null || draftQualityValue === undefined || savingQualityMarkTaskId === task.id;
 
                   return (
                     <div key={task.id} className="py-4">
@@ -3705,7 +4059,6 @@ export default function AdminDashboard() {
                           <textarea value={actualStatusMap[task.id] ?? ""} onChange={(e) => handleActualChange(task.id, e.target.value)} className="w-full md:w-11/12 border rounded p-2 text-sm min-h-[60px] resize-y" placeholder="Write actual status here..." />
                           <div className="mt-2 flex gap-2">
                             <button onClick={() => saveActualStatus(task.id)} className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1 rounded text-sm">Save</button>
-                            {showDeleteTasks && <button onClick={() => deleteTask(task.id, task.title)} className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-sm">Delete</button>}
                           </div>
                         </div>
 
@@ -3751,7 +4104,8 @@ export default function AdminDashboard() {
                                 max="100"
                                 value={draftQualityValue === undefined || draftQualityValue === null ? "" : draftQualityValue}
                                 onChange={(e) => setQualityMarksDraft((prev) => ({ ...prev, [task.id]: e.target.value }))}
-                                className="w-24 border border-indigo-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                                disabled={qualityScoreLocked}
+                                className={`w-24 border border-indigo-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 ${qualityScoreLocked ? "bg-gray-100 cursor-not-allowed" : ""}`}
                                 placeholder="0-100"
                               />
                               <button
@@ -3762,6 +4116,9 @@ export default function AdminDashboard() {
                                 {savingQualityMarkTaskId === task.id ? "Saving..." : "Save score"}
                               </button>
                             </div>
+                            {qualityScoreLocked && (
+                              <p className="text-xs text-indigo-700 mt-2">Quality score locked after initial save.</p>
+                            )}
                           </div>
                         </div>
                       )}
