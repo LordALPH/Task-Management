@@ -20,6 +20,9 @@ You can start editing the page by modifying `app/page.js`. The page auto-updates
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+
+![iamge alt]([image_url](https://github.com/LordALPH/Task-Management/blob/e219e91fb3834c26abed30e23c2d6d8ea2ee393a/Gemini_Generated_Image_86y01z86y01z86y0.jpg))
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
