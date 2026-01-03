@@ -1,147 +1,163 @@
-const admin = require("firebase-admin");
+import { verifyAuthHeader } from "../../../lib/server/firebaseAdmin";
 
-function initAdmin() {
-  if (admin.apps && admin.apps.length) return admin;
-  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    try {
-      const svc = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-      admin.initializeApp({ credential: admin.credential.cert(svc) });
-      return admin;
-    } catch (err) {
-      console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT", err);
-    }
+const FIRESTORE_QUERY_ENDPOINT = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID
+  ? `https://firestore.googleapis.com/v1/projects/${process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID}/databases/(default)/documents:runQuery`
+  : null;
+
+const decodeValue = (value) => {
+  if (!value) return null;
+  if (value.stringValue !== undefined) return value.stringValue;
+  if (value.integerValue !== undefined) return Number(value.integerValue);
+  if (value.doubleValue !== undefined) return Number(value.doubleValue);
+  if (value.timestampValue !== undefined) return value.timestampValue;
+  if (value.booleanValue !== undefined) return Boolean(value.booleanValue);
+  if (value.arrayValue?.values) {
+    return value.arrayValue.values.map(decodeValue);
   }
-  admin.initializeApp();
-  return admin;
-}
-
-const app = initAdmin();
-const db = app.firestore();
-
-const isTimestamp = (value) => {
-  return Boolean(
-    value &&
-    typeof value.toDate === "function" &&
-    (typeof value.seconds === "number" || typeof value._seconds === "number")
-  );
+  if (value.mapValue?.fields) {
+    const entries = value.mapValue.fields;
+    return Object.keys(entries).reduce((acc, key) => {
+      acc[key] = decodeValue(entries[key]);
+      return acc;
+    }, {});
+  }
+  return null;
 };
 
-const serializeValue = (value) => {
-  if (value === undefined || value === null) return null;
-  if (isTimestamp(value)) {
-    try {
-      return value.toDate().toISOString();
-    } catch (_) {
-      return null;
-    }
-  }
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
-  if (Array.isArray(value)) {
-    return value.map((item) => serializeValue(item));
-  }
-  if (typeof value === "object") {
-    const result = {};
-    Object.keys(value).forEach((key) => {
-      result[key] = serializeValue(value[key]);
-    });
-    return result;
-  }
-  return value;
+const mapDocument = (document) => {
+  const fields = document.fields || {};
+  const read = (key) => decodeValue(fields[key]);
+  const rawScore = read("score");
+  const numericScore = Number(rawScore);
+
+  return {
+    id: document.name?.split("/").pop() || document.name || "",
+    userId: read("userId") || null,
+    userEmail: read("userEmail") || null,
+    userName: read("userName") || null,
+    month: read("month") || null,
+    year: read("year") || null,
+    score: Number.isFinite(numericScore) ? numericScore : 0,
+    addedAt: read("addedAt") || null,
+    addedBy: read("addedBy") || null,
+  };
 };
 
-async function verifyUserRequest(req) {
-  const authHeader = req.headers.authorization || "";
-  if (!authHeader.startsWith("Bearer ")) {
-    return null;
+const buildFilterInputs = (identity) => {
+  const filters = [];
+  if (identity.uid) {
+    filters.push({ fieldPath: "userId", value: identity.uid });
   }
-  const token = authHeader.slice(7).trim();
-  if (!token) return null;
-
-  try {
-    const decoded = await app.auth().verifyIdToken(token);
-    if (!decoded || !decoded.uid) {
-      return null;
-    }
-    return decoded;
-  } catch (err) {
-    console.error("Failed to verify employee token", err);
-    return null;
+  if (identity.email) {
+    filters.push({ fieldPath: "userEmail", value: identity.email });
   }
-}
+  return filters;
+};
 
-async function collectOwnerIds(uid) {
-  const ownerIds = new Set();
-  if (uid) ownerIds.add(uid);
-  try {
-    const usersRef = db.collection("users");
-    const directDoc = await usersRef.doc(uid).get();
-    if (directDoc.exists) {
-      ownerIds.add(directDoc.id);
-      const directData = directDoc.data() || {};
-      if (directData.uid) ownerIds.add(directData.uid);
-    } else {
-      const altSnap = await usersRef.where("uid", "==", uid).limit(1).get();
-      if (!altSnap.empty) {
-        ownerIds.add(altSnap.docs[0].id);
-        const altData = altSnap.docs[0].data() || {};
-        if (altData.uid) ownerIds.add(altData.uid);
-      }
-    }
-  } catch (err) {
-    console.error("Failed to resolve owner ids", err);
+const runKpiQuery = async ({ authorization, fieldPath, value }) => {
+  const queryBody = {
+    structuredQuery: {
+      from: [{ collectionId: "kpi" }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath },
+          op: "EQUAL",
+          value: { stringValue: value },
+        },
+      },
+      limit: 50,
+    },
+  };
+
+  const response = await fetch(FIRESTORE_QUERY_ENDPOINT, {
+    method: "POST",
+    headers: {
+      Authorization: authorization,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(queryBody),
+  });
+
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = payload?.error?.message || "Failed to load KPI records";
+    const error = new Error(message);
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
   }
-  return Array.from(ownerIds).filter(Boolean);
-}
 
-async function fetchKpisForOwner(ownerId) {
-  if (!ownerId) return [];
-  const snapshot = await db.collection("kpi").where("userId", "==", ownerId).get();
-  return snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...serializeValue(docSnap.data() || {}) }));
-}
+  return payload || [];
+};
 
-async function fetchKpisForEmail(email) {
-  if (!email) return [];
-  const snapshot = await db.collection("kpi").where("userEmail", "==", email).get();
-  return snapshot.docs.map((docSnap) => ({ id: docSnap.id, ...serializeValue(docSnap.data() || {}) }));
-}
+const matchesIdentity = (entry, identity) => {
+  if (identity.uid && entry.userId && entry.userId === identity.uid) {
+    return true;
+  }
+  if (identity.email && entry.userEmail && entry.userEmail.toLowerCase() === identity.email.toLowerCase()) {
+    return true;
+  }
+  if (identity.uid && entry.id && entry.id.startsWith(`${identity.uid}_`)) {
+    return true;
+  }
+  return false;
+};
 
 export default async function handler(req, res) {
   if (req.method !== "GET") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const decoded = await verifyUserRequest(req);
-  if (!decoded) {
-    return res.status(403).json({ error: "Unauthorized" });
+  if (!FIRESTORE_QUERY_ENDPOINT) {
+    return res.status(500).json({ error: "Missing Firebase project configuration" });
   }
 
   try {
-    const entriesMap = new Map();
-    const ownerIds = await collectOwnerIds(decoded.uid);
-    for (const ownerId of ownerIds) {
-      const rows = await fetchKpisForOwner(ownerId);
-      rows.forEach((row) => entriesMap.set(row.id, row));
+    const decoded = await verifyAuthHeader(req);
+    if (!decoded) {
+      return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const emailCandidates = new Set();
-    if (decoded.email) {
-      emailCandidates.add(decoded.email);
-      const lower = decoded.email.toLowerCase();
-      if (lower !== decoded.email) {
-        emailCandidates.add(lower);
+    const filters = buildFilterInputs(decoded);
+    if (filters.length === 0) {
+      return res.status(400).json({ error: "Unable to determine employee identity" });
+    }
+
+    const authorizationHeader = decoded.token ? `Bearer ${decoded.token}` : req.headers.authorization;
+    const entriesMap = new Map();
+
+    for (const filter of filters) {
+      try {
+        const rawRows = await runKpiQuery({
+          authorization: authorizationHeader,
+          fieldPath: filter.fieldPath,
+          value: filter.value,
+        });
+
+        rawRows.forEach((row) => {
+          if (!row?.document) return;
+          const entry = mapDocument(row.document);
+          if (matchesIdentity(entry, decoded)) {
+            entriesMap.set(entry.id, entry);
+          }
+        });
+      } catch (error) {
+        console.error(`Firestore KPI query failed for ${filter.fieldPath}`, error?.payload || error);
+        if (error?.status && error.status !== 404) {
+          return res.status(error.status).json({ error: error.message });
+        }
       }
     }
 
-    for (const email of emailCandidates) {
-      const rows = await fetchKpisForEmail(email);
-      rows.forEach((row) => entriesMap.set(row.id, row));
-    }
+    const entries = Array.from(entriesMap.values()).sort((a, b) => {
+      const aTime = a.addedAt ? Date.parse(a.addedAt) : 0;
+      const bTime = b.addedAt ? Date.parse(b.addedAt) : 0;
+      return bTime - aTime;
+    }).slice(0, 50);
 
-    return res.status(200).json({ entries: Array.from(entriesMap.values()) });
-  } catch (err) {
-    console.error("KPI API error:", err);
-    return res.status(500).json({ error: err.message || "Failed to fetch KPI records" });
+    return res.status(200).json({ entries });
+  } catch (error) {
+    console.error("Employee KPI API error", error);
+    return res.status(500).json({ error: error.message || "Failed to fetch KPI records" });
   }
 }

@@ -104,27 +104,136 @@ export default function AdminDashboard() {
   const [evaluationEndDate, setEvaluationEndDate] = useState("");
   const [attendanceRecords, setAttendanceRecords] = useState([]);
   const [kpiRecords, setKpiRecords] = useState([]);
+  const [kpiLoading, setKpiLoading] = useState(false);
+  const [kpiError, setKpiError] = useState("");
 
-  // Fallback loader so employees can still see KPI data if Firestore denies direct reads
+  // Load KPI data directly from Firestore, falling back to the API route only if needed
   const fetchKpisViaApi = useCallback(async () => {
-    try {
-      const activeUser = auth.currentUser || currentUser;
-      if (!activeUser) return;
-      const token = await activeUser.getIdToken();
-      const response = await fetch("/api/employee/kpi", {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-      if (!response.ok) {
-        const message = await response.text();
-        throw new Error(message || "Failed to load KPI records via API");
+    if (!currentUser) {
+      setKpiRecords([]);
+      setKpiError("");
+      return;
+    }
+
+    const serializeSnapshot = (docSnap) => {
+      const data = docSnap.data() || {};
+      let addedAt = data.addedAt || null;
+      if (addedAt && typeof addedAt.toDate === "function") {
+        try {
+          addedAt = addedAt.toDate().toISOString();
+        } catch (err) {
+          console.warn("Failed to convert KPI timestamp", err);
+          addedAt = null;
+        }
+      } else if (addedAt instanceof Date) {
+        addedAt = addedAt.toISOString();
+      } else if (typeof addedAt !== "string") {
+        addedAt = null;
       }
-      const payload = await response.json();
-      const entries = Array.isArray(payload?.entries) ? payload.entries : [];
-      setKpiRecords(entries);
-    } catch (error) {
-      console.error("Failed to load KPI records via API", error);
+
+      return {
+        id: docSnap.id,
+        userId: data.userId || null,
+        userEmail: data.userEmail || null,
+        userName: data.userName || null,
+        month: data.month || null,
+        year: data.year || null,
+        score: typeof data.score === "number" ? data.score : Number(data.score) || 0,
+        addedAt,
+        addedBy: data.addedBy || null,
+      };
+    };
+
+    const gatherFromFirestore = async () => {
+      const queryFactories = [];
+      if (currentUser.uid) {
+        queryFactories.push({
+          label: "userId",
+          run: () => getDocs(query(collection(db, "kpi"), where("userId", "==", currentUser.uid))),
+        });
+      }
+      if (currentUser.email) {
+        queryFactories.push({
+          label: "userEmail",
+          run: () => getDocs(query(collection(db, "kpi"), where("userEmail", "==", currentUser.email))),
+        });
+      }
+      if (!queryFactories.length) {
+        throw new Error("Missing employee identifiers");
+      }
+
+      const seen = new Map();
+      for (const { label, run } of queryFactories) {
+        try {
+          const snap = await run();
+          snap.forEach((docSnap) => {
+            const entry = serializeSnapshot(docSnap);
+            seen.set(entry.id, entry);
+          });
+        } catch (error) {
+          console.warn(`KPI query failed for ${label}`, error);
+        }
+      }
+
+      return Array.from(seen.values());
+    };
+
+    const gatherViaApi = async () => {
+      const tokenProvider = currentUser || auth.currentUser;
+      const idToken = await tokenProvider?.getIdToken?.();
+      if (!idToken) {
+        throw new Error("Unable to verify your session");
+      }
+
+      const response = await fetch("/api/employee/kpi", {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || "Failed to load KPI records");
+      }
+      return Array.isArray(payload?.entries) ? payload.entries : [];
+    };
+
+    try {
+      setKpiLoading(true);
+      setKpiError("");
+      const directEntries = await gatherFromFirestore();
+      const orderedDirect = directEntries
+        .sort((a, b) => {
+          const aTime = a.addedAt ? Date.parse(a.addedAt) : 0;
+          const bTime = b.addedAt ? Date.parse(b.addedAt) : 0;
+          return bTime - aTime;
+        })
+        .slice(0, 50);
+
+      setKpiRecords(orderedDirect);
+      if (!orderedDirect.length) {
+        setKpiError("No KPI records found yet.");
+      }
+    } catch (firestoreError) {
+      console.warn("Direct KPI fetch failed, attempting API fallback", firestoreError);
+      try {
+        const fallbackEntries = await gatherViaApi();
+        const orderedFallback = fallbackEntries
+          .sort((a, b) => {
+            const aTime = a.addedAt ? Date.parse(a.addedAt) : 0;
+            const bTime = b.addedAt ? Date.parse(b.addedAt) : 0;
+            return bTime - aTime;
+          })
+          .slice(0, 50);
+
+        setKpiRecords(orderedFallback);
+        if (!orderedFallback.length) {
+          setKpiError("No KPI records found yet.");
+        }
+      } catch (apiError) {
+        console.error("Failed to load KPI records", apiError);
+        setKpiRecords([]);
+        setKpiError(apiError?.message || "Unable to load KPI records");
+      }
+    } finally {
+      setKpiLoading(false);
     }
   }, [currentUser]);
 
@@ -742,85 +851,8 @@ export default function AdminDashboard() {
   }, [currentUser, meProfileUid, meProfileId]);
 
   useEffect(() => {
-    if (!currentUser) {
-      setKpiRecords([]);
-      return;
-    }
-
-    let idDocs = [];
-    let emailDocs = [];
-    let unsubId = () => {};
-    let unsubEmail = () => {};
-    let unsubscribed = false;
-    let fallbackTriggered = false;
-
-    const triggerFallback = () => {
-      if (fallbackTriggered || unsubscribed) return;
-      fallbackTriggered = true;
-      fetchKpisViaApi();
-    };
-
-    const sync = () => {
-      if (unsubscribed) return;
-      const map = {};
-      [...idDocs, ...emailDocs].forEach((entry) => {
-        if (!entry) return;
-        map[entry.id] = entry;
-      });
-      setKpiRecords(Object.values(map));
-    };
-
-    const handleKpiError = (error) => {
-      console.error("Failed to load KPI records", error);
-      if (unsubscribed) return;
-      setKpiRecords([]);
-      triggerFallback();
-    };
-
-    const identifiers = new Set();
-    if (currentUser.uid) identifiers.add(currentUser.uid);
-    if (meProfileUid) identifiers.add(meProfileUid);
-    if (meProfileId) identifiers.add(meProfileId);
-    const idList = Array.from(identifiers).filter(Boolean);
-
-    if (idList.length > 0) {
-      const limitedIds = idList.slice(0, 10);
-      const kpiQuery =
-        limitedIds.length === 1
-          ? query(collection(db, "kpi"), where("userId", "==", limitedIds[0]))
-          : query(collection(db, "kpi"), where("userId", "in", limitedIds));
-      unsubId = onSnapshot(
-        kpiQuery,
-        (snap) => {
-          idDocs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-          sync();
-        },
-        handleKpiError
-      );
-    } else {
-      triggerFallback();
-    }
-
-    if (currentUser.email || meProfileEmail) {
-      const emailQuery = query(collection(db, "kpi"), where("userEmail", "==", meProfileEmail || currentUser.email));
-      unsubEmail = onSnapshot(
-        emailQuery,
-        (snap) => {
-          emailDocs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-          sync();
-        },
-        handleKpiError
-      );
-    } else {
-      triggerFallback();
-    }
-
-    return () => {
-      unsubscribed = true;
-      unsubId();
-      unsubEmail();
-    };
-  }, [currentUser, meProfileUid, meProfileId, meProfileEmail, fetchKpisViaApi]);
+    fetchKpisViaApi();
+  }, [fetchKpisViaApi]);
 
   const myTasks = useMemo(() => {
     if (!currentUser || !tasks) return [];
@@ -887,6 +919,14 @@ export default function AdminDashboard() {
   const filteredKpiRecords = useMemo(() => {
     return kpiRecords.filter((entry) => isWithinRange(getKpiEntryDate(entry), evaluationStartDate, evaluationEndDate));
   }, [kpiRecords, evaluationStartDate, evaluationEndDate]);
+
+  const sortedKpiRecords = useMemo(() => {
+    return filteredKpiRecords.slice().sort((a, b) => {
+      const dateA = getKpiEntryDate(a);
+      const dateB = getKpiEntryDate(b);
+      return (dateB?.getTime() || 0) - (dateA?.getTime() || 0);
+    });
+  }, [filteredKpiRecords]);
 
   const evaluationStats = useMemo(() => {
     const completedCount = evaluationTasks.filter((task) => canonicalStatus(task.status || task.actualStatus || "") === "completed").length;
@@ -1066,6 +1106,43 @@ export default function AdminDashboard() {
             </div>
 
             <p className="mt-4 text-xs text-gray-500">Lifetime summary: {myEvaluation.completed}/{myEvaluation.total} tasks closed ({myEvaluation.rate}%).</p>
+
+            <div className="mt-6">
+              <div className="flex items-center justify-between gap-3 mb-2">
+                <div>
+                  <h4 className="text-md font-semibold text-gray-800">KPI history</h4>
+                  <p className="text-xs text-gray-500">Only your KPI scores {evaluationRangeActive ? "in this range" : "recorded to date"} are shown.</p>
+                </div>
+                {kpiLoading && <span className="text-xs font-semibold text-indigo-600">Loading…</span>}
+              </div>
+
+              {kpiError ? (
+                <p className="text-sm text-red-600">{kpiError}</p>
+              ) : sortedKpiRecords.length === 0 ? (
+                <p className="text-sm text-gray-500">{evaluationRangeActive ? "No KPI entries fall inside this range." : "No KPI scores have been recorded yet."}</p>
+              ) : (
+                <div className="overflow-hidden rounded-2xl border">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="bg-slate-50 text-left text-xs font-semibold uppercase tracking-widest text-gray-500">
+                        <th className="px-4 py-2">Month</th>
+                        <th className="px-4 py-2">Score</th>
+                        <th className="px-4 py-2">Recorded</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedKpiRecords.map((entry) => (
+                        <tr key={entry.id} className="border-t last:border-b-0">
+                          <td className="px-4 py-2 text-gray-800">{entry.month || "-"} {entry.year || ""}</td>
+                          <td className="px-4 py-2 font-semibold text-gray-900">{formatOneDecimal(Number(entry.score) || 0)}</td>
+                          <td className="px-4 py-2 text-xs text-gray-500">{entry.addedAt ? formatDate(entry.addedAt) : "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 

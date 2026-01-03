@@ -58,6 +58,14 @@ const ATTENDANCE_STATUS_CONFIG = {
       inactive: "bg-emerald-100 text-emerald-700 hover:bg-emerald-200",
     },
   },
+  halfDay: {
+    label: "Half day",
+    badgeClass: "bg-amber-100 text-amber-700",
+    button: {
+      active: "bg-amber-600 text-white",
+      inactive: "bg-amber-100 text-amber-700 hover:bg-amber-200",
+    },
+  },
   shortLeave: {
     label: "Short leave",
     badgeClass: "bg-purple-100 text-purple-700",
@@ -84,7 +92,7 @@ const ATTENDANCE_STATUS_CONFIG = {
   },
 };
 
-const ATTENDANCE_STATUS_ORDER = ["present", "outdoor", "shortLeave", "absent", "off"];
+const ATTENDANCE_STATUS_ORDER = ["present", "outdoor", "halfDay", "shortLeave", "absent", "off"];
 
 const INLINE_STATUS_OPTIONS = ["pending", "in process", "completed", "delayed", "cancelled"];
 const INLINE_PRIORITY_OPTIONS = ["high", "medium", "low"];
@@ -187,7 +195,8 @@ const normalizeAttendanceStatus = (value) => {
   if (ATTENDANCE_STATUS_ORDER.includes(lower)) return lower;
 
   const collapsed = lower.replace(/[^a-z]/g, "");
-  if (collapsed === "shortleave" || collapsed === "halfday" || collapsed === "shortleaves") return "shortLeave";
+  if (["halfday", "halfdays", "halfdayleave", "half"].includes(collapsed)) return "halfDay";
+  if (collapsed === "shortleave" || collapsed === "shortleaves") return "shortLeave";
   if (collapsed === "present" || collapsed === "p" || collapsed === "presentday") return "present";
   if (collapsed === "outdoor" || collapsed === "out" || collapsed === "field" || collapsed === "onsite") return "outdoor";
   if (collapsed === "absent" || collapsed === "a" || collapsed === "leave" || collapsed === "sick") return "absent";
@@ -533,6 +542,8 @@ export default function AdminDashboard() {
   // approvals list
   const [showApprovalsPanel, setShowApprovalsPanel] = useState(false);
   const [approvals, setApprovals] = useState([]);
+  const pendingApprovalsCount = approvals.length;
+  const hasPendingApprovals = pendingApprovalsCount > 0;
   // Task closing feature state
   const [showTaskClosingPanel, setShowTaskClosingPanel] = useState(false);
   const [selectedMemberForClosing, setSelectedMemberForClosing] = useState("");
@@ -1467,6 +1478,7 @@ export default function AdminDashboard() {
     const counts = {
       present: 0,
       outdoor: 0,
+      halfDay: 0,
       shortLeave: 0,
       absent: 0,
       off: 0,
@@ -1486,6 +1498,10 @@ export default function AdminDashboard() {
         counts.outdoor += 1;
         return;
       }
+      if (status === "halfDay") {
+        counts.halfDay += 1;
+        return;
+      }
       if (status === "shortLeave") {
         counts.shortLeave += 1;
         return;
@@ -1495,8 +1511,11 @@ export default function AdminDashboard() {
       }
     });
 
-    const numerator = counts.present + counts.outdoor + counts.shortLeave * 0.8;
-    const denominator = counts.present + counts.outdoor + counts.shortLeave + counts.absent;
+    // Attendance % per policy: (Present + Outdoor + ShortLeave*0.8 + HalfDay*0.5) / (Present + Outdoor + ShortLeave + HalfDay + Absent)
+    const numerator =
+      counts.present + counts.outdoor + counts.shortLeave * 0.8 + counts.halfDay * 0.5;
+    const denominator =
+      counts.present + counts.outdoor + counts.shortLeave + counts.halfDay + counts.absent;
     const percentage = denominator > 0 ? (numerator / denominator) * 100 : 0;
 
     return { ...counts, percentage };
@@ -1515,6 +1534,7 @@ export default function AdminDashboard() {
         name: u.name || u.email,
         present: metrics.present,
         outdoor: metrics.outdoor,
+        halfDay: metrics.halfDay,
         shortLeave: metrics.shortLeave,
         absent: metrics.absent,
         off: metrics.off,
@@ -2313,7 +2333,28 @@ export default function AdminDashboard() {
                 <div className="flex flex-col gap-2">
                 <button onClick={() => { setShowAddEmployeePanel((s) => !s); setShowAddTaskPanel(false); setShowBulkPanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Add Employee</button>
                 <button onClick={() => { setShowAddTaskPanel((s) => !s); setShowAddEmployeePanel(false); setShowBulkPanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Add Task</button>
-                <button onClick={() => { setShowApprovalsPanel((s) => !s); setShowBulkUserPanel(false); setShowBulkPanel(false); setShowAddTaskPanel(false); setShowAddEmployeePanel(false); }} className="text-sm px-3 py-2 rounded bg-white/6 text-left w-full">Approvals</button>
+                <button
+                  onClick={() => {
+                    setShowApprovalsPanel((s) => !s);
+                    setShowBulkUserPanel(false);
+                    setShowBulkPanel(false);
+                    setShowAddTaskPanel(false);
+                    setShowAddEmployeePanel(false);
+                  }}
+                  className={`text-sm px-3 py-2 rounded w-full flex items-center justify-between gap-2 text-left transition ${
+                    hasPendingApprovals
+                      ? "bg-white text-indigo-900 font-semibold shadow-lg ring-2 ring-amber-200/70 approval-alert"
+                      : "bg-white/6 hover:bg-white/10"
+                  }`}
+                >
+                  <span>Approvals</span>
+                  {hasPendingApprovals && (
+                    <span className="flex items-center gap-1 text-xs font-semibold text-rose-600">
+                      <span aria-hidden="true">🔔</span>
+                      <span>{pendingApprovalsCount}</span>
+                    </span>
+                  )}
+                </button>
               </div>
             </div>
           </div>
@@ -2594,6 +2635,10 @@ export default function AdminDashboard() {
                                     <span className="font-semibold text-gray-800">{summary.shortLeave}</span>
                                   </div>
                                   <div className="flex items-center justify-between">
+                                    <span className="text-gray-500">Half days</span>
+                                    <span className="font-semibold text-gray-800">{summary.halfDay}</span>
+                                  </div>
+                                  <div className="flex items-center justify-between">
                                     <span className="text-gray-500">Absents</span>
                                     <span className="font-semibold text-gray-800">{summary.absent}</span>
                                   </div>
@@ -2625,7 +2670,7 @@ export default function AdminDashboard() {
                                   Clear selection
                                 </button>
                               </div>
-                              <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs sm:text-sm">
+                              <div className="mt-3 grid grid-cols-2 sm:grid-cols-6 gap-3 text-xs sm:text-sm">
                                 <div className="flex items-center justify-between">
                                   <span className="text-gray-500">Present</span>
                                   <span className="font-semibold text-gray-800">{selectedAttendanceDetails.metrics?.present ?? 0}</span>
@@ -2637,6 +2682,10 @@ export default function AdminDashboard() {
                                 <div className="flex items-center justify-between">
                                   <span className="text-gray-500">Short leaves</span>
                                   <span className="font-semibold text-gray-800">{selectedAttendanceDetails.metrics?.shortLeave ?? 0}</span>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-gray-500">Half days</span>
+                                  <span className="font-semibold text-gray-800">{selectedAttendanceDetails.metrics?.halfDay ?? 0}</span>
                                 </div>
                                 <div className="flex items-center justify-between">
                                   <span className="text-gray-500">Absents</span>

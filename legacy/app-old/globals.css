@@ -47,6 +47,17 @@ body {
 }
 .animate-slide-down { animation: slideDown 360ms cubic-bezier(.22,.9,.32,1) both; }
 
+@keyframes approvalWiggle {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-2px); }
+  40% { transform: translateX(3px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(2px); }
+}
+.approval-alert {
+  animation: approvalWiggle 0.85s ease-in-out infinite;
+}
+
 .nav-item { transition: transform .18s ease, background-color .18s ease, color .18s ease; }
 .nav-item:hover { transform: translateX(6px); }
 
