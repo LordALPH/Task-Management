@@ -3197,7 +3197,7 @@ export default function AdminDashboard() {
                                     </tr>
                                   </thead>
                                   <tbody>
-                                    {memberTasks.map((task, idx) => {
+                                    {completedOnly.map((task, idx) => {
                                       const taskQualityValue = qualityMarksDraft[task.id] ?? task.qualityMark ?? "";
                                       const isQualityLocked = typeof task.qualityMark === "number" || Boolean(qualityLockedTaskIds[task.id]);
                                       return (
@@ -3254,7 +3254,7 @@ export default function AdminDashboard() {
                                     })}
                                   </tbody>
                                 </table>
-                                {memberTasks.length === 0 && (
+                                {completedOnly.length === 0 && (
                                   <p className="p-6 text-center text-gray-500">No completed tasks found for this member</p>
                                 )}
                               </div>
